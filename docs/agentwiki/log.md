@@ -531,3 +531,14 @@
 - 结论修正：C4「扫描无高危」不成立（上游基座库存问题，非 digest pin 引入）；基座升级与阈值策略为后续项，当前 exit-code=0 不设门禁。
 - 未验证：artifact 未上传（下载域名不可达，证据取自 job 日志）；未做两次 --no-cache 构建的 bit-for-bit 比对。
 - 文档：更新 [[wiki/C4-staging镜像治理]]（扫描结果表、CRITICAL 明细、冲突与未知）、[[wiki/P2规划]] C4 行、[[index]] 条目。
+
+## [2026-11-13] chore+verify | C4 基座升级与复扫
+- 触发：首轮扫描得 5 CRITICAL，处置建议第一项为升级 nginx/node 基座并重新 pin。
+- 选型（事实）：`node:20-alpine` 远端 digest 与本地一致、2025-04 后未重建（EOL 停更，无可用修复）；nginx 1.27 主线退役，`stable-alpine` 与 `1.30-alpine` 同 digest `583b7f2f…`；postgres 仅取 16 大版本内最新重建（2026-11-12 构建）。node 取 22 而非 24：river `.github/workflows/verify.yml` 已用 `node-version: 22`，保持镜像与验证运行时一致。
+- 改动：river `infra/docker/Dockerfile` 的 `NODE_IMAGE`/`NGINX_IMAGE`、`docker-compose.staging.yml` 的 postgres `image` 改为 `tag@digest`；平台 `.github/workflows/image-scan.yml` 矩阵同步同一组 pin（commit `bf5f974`，已推送 `main`）。river 仓库按既有约定未提交。
+- 验证：`config -q` OK；`build` 成功且 `docker history river-api:latest` 各层为本次新建（非复用旧缓存）；`up -d --wait` 三容器 healthy；`GET /` 200；`POST /api/guests` 200（player id `7676990d-…` 由 postgres 生成）；api 日志无 error；`down` 收尾。镜像内实测：node v22.23.5 / npm 10.9.9 / tar 7.5.22、nginx 1.30.6 / openssl 3.5.9-r0 / brotli 1.2.1-r0、postgres 16.16，三者 alpine 3.24.4。
+- 复扫（运行 43380314435，三 job success）：**CRITICAL 5 → 1、HIGH 151 → 39**；nginx 3H/0C、node 10H/0C、postgres 25H/1C。三个镜像 OS 层清零。
+- 残留（均为上游阻塞）：postgres `CVE-2025-68121`（Go `stdlib` 1.24.6，需 1.24.13+）；nginx 3H 为 `libxslt 1.1.43-r3`（修复版 r4 已发布，待镜像重建）；node 10H 为 npm CLI 自带依赖（build 阶段，运行时不加载）。
+- 未验证：未跑 river 全量测试（`npm run verify`，含 Playwright/testcontainers）；未做两次 `--no-cache` 的 bit-for-bit 比对；阈值门禁未启用（`exit-code=0`）；扫描 artifact 未上传。
+- 纠错：PowerShell 会剥掉单引号字符串内的双引号，`curl -d '{"nickname":…}'` 实际发出 `{nickname:…}` 得 400，属探针构造问题；改 `Invoke-WebRequest -UseBasicParsing` 后 200。
+- 文档：更新 [[wiki/C4-staging镜像治理]]（升级 pin 对照、复扫对比、残留与未知）、[[wiki/P2规划]] C4 行、[[index]] 条目。

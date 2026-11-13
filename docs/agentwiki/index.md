@@ -14,7 +14,7 @@ Obsidian 浏览，Agent 维护，Git 保存版本。当前 Vault 已连接到本
 - [[wiki/节点规则]]：逐节点逻辑规则（前置校验/动作/通过条件/失败出口）、规则分层与优化候选、可视化建议。
 - [[wiki/权限矩阵配置清单]]：V2.2 §6.4 权限矩阵到实际配置的逐格映射（C2 审计）、三条红线核对与 6 项缺口。
 - [[wiki/C5-supervisor验证]]：supervisor 自愈边界实测（C5）——软停不自愈、孤儿进程风险与树杀修复。
-- [[wiki/C4-staging镜像治理]]：staging 基座镜像 digest pin（C4）——构建/运行已验证，Actions 扫描得 5 CRITICAL / 151 HIGH。
+- [[wiki/C4-staging镜像治理]]：staging 基座镜像 `tag@digest` pin + 基座升级（C4）——node 22 / nginx 1.30 / postgres 16.16，复扫 CRITICAL 5 → 1、HIGH 151 → 39。
 - [[wiki/C3-CI首跑]]：GitHub Actions 远端首跑（C3）——两次运行、三类 Linux 兼容缺陷与 gitleaks 全历史扫描修复。
 - [[wiki/待核实问题]]：证据缺口。
 - [[wiki/使用指南]]：摄取、问答、巡检。
