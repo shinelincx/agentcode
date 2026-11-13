@@ -1010,9 +1010,18 @@ def _project_config() -> dict:
 
 
 def _repo_path() -> str:
-    """业务仓库路径：project.yaml repo_path 优先，缺省回退 <平台>/river。"""
+    """业务仓库路径：project.yaml repo_path 优先，缺省回退 <平台上级>/river。
+
+    RIVER_WS 被重定向（临时项目/测试）时回退到 <工作区>/repo：既避免
+    RIVER_WS.parents[2] 在浅路径（如 /tmp/ac-x）上越界，也避免向
+    不可写路径（容器根目录）建目录。
+    """
     configured = _project_config().get("repo_path")
-    return str(configured) if configured else str(RIVER_WS.parents[2] / "river")
+    if configured:
+        return str(configured)
+    if RIVER_WS.parent == PROJECTS_DIR:
+        return str(PROJECTS_DIR.parent.parent / "river")
+    return str(RIVER_WS / "repo")
 
 
 def refresh_runtime_config() -> dict:

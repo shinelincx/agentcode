@@ -41,8 +41,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 直接下载固定版本二进制：gitleaks-action 会按 event 的 before..after 生成
+      # 增量 log-opts，首次推送（before 为空/根提交）时得到 `<root>^..HEAD` 而报
+      # “ambiguous argument”，与是否泄漏无关。全历史扫描可稳定复现。
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+
       # 凭据扫描：使用仓库根 .gitleaks.toml 的 allowlist（projects/*/codex-home/）
       - name: gitleaks detect
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gitleaks git --redact -v --exit-code=2 --config .gitleaks.toml

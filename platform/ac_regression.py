@@ -2012,8 +2012,9 @@ def multi01(ws: Path):
     check("set_project 消费 proj-b 配置：project=proj-b",
           cfg_b.get("project") == "proj-b")
     tech_b = cfg_b.get("tech_stack") or {}
-    check("proj-b 接入独立仓库 pdca-erp",
-          Path(str(cfg_b.get("repo_path", ""))).name.lower() == "pdca-erp",
+    # 跨平台：project.yaml 里是 Windows 路径，Linux 上 PosixPath.name 不会按反斜杠切分
+    repo_b = str(cfg_b.get("repo_path", "")).replace("\\", "/").rstrip("/").split("/")[-1]
+    check("proj-b 接入独立仓库 pdca-erp", repo_b.lower() == "pdca-erp",
           f"repo_path={cfg_b.get('repo_path')}")
     check("proj-b 消费双 lane 配置（frontend + backend）",
           tech_b.get("web") == "frontend" and tech_b.get("api") == "backend"
