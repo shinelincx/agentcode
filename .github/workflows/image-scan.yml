@@ -1,0 +1,35 @@
+name: image-scan
+
+# C4 收尾：staging 基座镜像漏洞扫描。
+# 本地网络无法拉取 trivy 漏洞库（mirror.gcr.io / registry-1.docker.io 不可达，
+# ghcr.io 大 blob 超时），因此把扫描放到 runner 上执行；仅手动触发，不参与 push 门禁。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 river/infra/docker/Dockerfile、river/docker-compose.staging.yml 的 pin 保持一致
+        image:
+          - docker.m.daocloud.io/library/node@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
+          - docker.m.daocloud.io/library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+          - docker.m.daocloud.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只记录不拦截：首轮目标是量出 HIGH/CRITICAL 清单，阈值策略待结果出来后单独定
+      - name: Trivy image scan (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.image }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
