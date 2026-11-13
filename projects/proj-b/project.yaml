@@ -19,6 +19,15 @@ model:
   default: gpt-6.1-terra
   degraded: gpt-6.1-sol
   strong_roles: [requirements, design, review]
+  roles:                       # 各 Agent 独立模型；缺省继承 default
+    requirements: gpt-6.1-terra
+    design: gpt-6.1-terra
+    prototype: gpt-6.1-terra
+    review: gpt-6.1-terra
+    implement: gpt-6.1-terra
+    test: gpt-6.1-terra          # 预留：当前不调用 LLM
+    deploy: gpt-6.1-terra        # 预留：当前不调用 LLM
+    retro: gpt-6.1-terra
 
 budget:
   unit: calls

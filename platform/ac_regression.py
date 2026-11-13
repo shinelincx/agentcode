@@ -1387,6 +1387,15 @@ model:
   default: gpt-6.1-terra
   degraded: gpt-6.1-sol
   strong_roles: [requirements, design, review]   # 永不降级
+  roles:
+    requirements: gpt-req-base
+    design: gpt-design-base
+    prototype: gpt-prototype-base
+    review: gpt-review-base
+    implement: gpt-implement-base
+    test: gpt-test-base
+    deploy: gpt-deploy-base
+    retro: gpt-retro-base
 
 budget:
   unit: calls
@@ -1444,13 +1453,20 @@ def config01(ws: Path):
     rejected({"budget.thresholds.alert": 0.95}, "阈值倒挂（alert ≥ degraded）被拒且文件不变")
     rejected({"test.gates": ["typecheck", "nope"]}, "test.gates 引用未定义门禁被拒")
     rejected({"deploy.staging.commands": []}, "required=true 且 commands 为空被拒")
+    rejected({"model.roles.implement": ""}, "Agent 独立模型为空被拒且文件不变")
     rejected({"budget.does_not_exist": 1}, "未知配置项被拒（不新建节点）")
+    invalid_roles = config_store.load(path)
+    invalid_roles["model"]["roles"]["unknown"] = "gpt-unknown"
+    check("model.roles 未知 Agent 被整体校验拒绝",
+          any("model.roles 含未知角色" in e for e in config_store.validate(invalid_roles)))
 
     result = config_store.apply_updates(path, {
         "budget.monthly_quota": 25000,
         "budget.max_usage_per_task": 180,
         "budget.thresholds.alert": 0.7,
         "model.strong_roles": ["requirements", "design"],
+        "model.roles.requirements": "gpt-req-v2",
+        "model.roles.implement": "gpt-implement-v2",
         "test.gates": ["typecheck"],
         "deploy.staging.commands": ["stub-deploy-v2"],
         "deploy.staging.timeout_seconds": 120,
@@ -1463,6 +1479,9 @@ def config01(ws: Path):
           and saved["budget"]["max_usage_per_task"] == 180
           and saved["budget"]["thresholds"]["alert"] == 0.7
           and saved["model"]["strong_roles"] == ["requirements", "design"]
+          and saved["model"]["roles"]["requirements"] == "gpt-req-v2"
+          and saved["model"]["roles"]["implement"] == "gpt-implement-v2"
+          and saved["model"]["roles"]["design"] == "gpt-design-base"
           and saved["test"]["gates"] == ["typecheck"]
           and saved["deploy"]["staging"]["commands"] == ["stub-deploy-v2"]
           and saved["deploy"]["staging"]["timeout_seconds"] == 120
@@ -1503,10 +1522,13 @@ def config01(ws: Path):
     ledger.configure_thresholds({})  # 复位，避免影响后续用例
     check("阈值缺省时回退默认值（不继承上一项目的配置）",
           ledger.THRESHOLDS == {"alert": 0.8, "degraded": 0.9, "paused": 1.0})
-    check("模型路由：强角色不降级、普通角色降级",
-          g.route_model("DEGRADED", "requirements") == "gpt-6.1-terra"
+    check("模型路由：角色独立覆盖、默认回退、强角色不降级、普通角色降级",
+          g.route_model("DEGRADED", "requirements") == "gpt-req-v2"
           and g.route_model("DEGRADED", "implement") == "gpt-6.1-sol"
-          and g.route_model("NORMAL", "implement") == "gpt-6.1-terra")
+          and g.route_model("NORMAL", "implement") == "gpt-implement-v2"
+          and g.route_model("ALERT", "prototype") == "gpt-prototype-base"
+          and g.route_model("NORMAL", "unconfigured") == "gpt-6.1-terra"
+          and g.route_model("NORMAL") == "gpt-6.1-terra")
     check("repo_path / codex_home 来自配置",
           g._repo_path() == str(ws) and g._base_codex_home() == ws / "codex-home")
 
@@ -1554,19 +1576,23 @@ def config01(ws: Path):
               status == 400 and path.read_text(encoding="utf-8") == before)
         status, data = req("POST", "/api/config", {
             "updates": {"budget.monthly_quota": 26000,
-                        "deploy.staging.timeout_seconds": 600},
+                        "deploy.staging.timeout_seconds": 600,
+                        "model.roles.design": "gpt-design-http"},
             "by": "console"}, {"X-Control": "1"})
-        check("合法配置经 HTTP 保存并刷新运行时",
+        check("合法配置经 HTTP 保存并刷新运行时（含 Agent 独立模型）",
               status == 200 and set(data["changed"]) == {"budget.monthly_quota",
-                                                         "deploy.staging.timeout_seconds"}
+                                                         "deploy.staging.timeout_seconds",
+                                                         "model.roles.design"}
               and config_store.load(path)["budget"]["monthly_quota"] == 26000
-              and data["runtime_refreshed"] and g.QUOTA == 26000)
+              and data["runtime_refreshed"] and g.QUOTA == 26000
+              and g.route_model("NORMAL", "design") == "gpt-design-http")
         status, page = req("GET", "/config")
         status_js, page_js = req("GET", "/settings.js")
         check("设置页入口可访问且含保存与预算字段",
               status == 200 and "设置" in page
               and status_js == 200 and "保存配置" in page_js
-              and "budget.monthly_quota" in page_js)
+              and "budget.monthly_quota" in page_js
+              and "Agent 独立模型" in page_js and "model.roles." in page_js)
     finally:
         srv.shutdown()
         srv.server_close()
@@ -2356,6 +2382,71 @@ def kill01(ws: Path):
     check("门禁超时终止进程树（心跳停止）", g1 > 0 and g1 == g2, f"{g1}->{g2}")
 
 
+# ---------------- MODEL-01 逐 Agent 模型路由（完整图执行，stub 不耗真实额度） ----------------
+
+def model01(ws: Path):
+    import graph as g
+    import worker as w
+    from langgraph.types import Command
+
+    db = new_db(ws)
+    g.RIVER_WS = ws
+    g.USAGE_BUFFER = ws / "usage_buffer.jsonl"
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    with (ws / "project.yaml").open("a", encoding="utf-8") as fh:
+        fh.write("""model:
+  default: model-fallback
+  degraded: model-degraded
+  strong_roles: [requirements, design, review]
+  roles:
+    requirements: model-requirements
+    design: model-design
+    prototype: model-prototype
+    review: model-review
+    implement: model-implement
+    test: model-test
+    deploy: model-deploy
+    retro: model-retro
+review:
+  codex: true
+retro:
+  generate: true
+""")
+
+    calls: list[str] = []
+    stub_codex = w.run_codex
+
+    def capture_codex(prompt, workdir, **kw):
+        calls.append(kw.get("model"))
+        return stub_codex(prompt, workdir, **kw)
+
+    w.run_codex = capture_codex
+    task_id = ledger.create_task(db, "model01")
+    cfg = {"configurable": {"thread_id": "model01"}}
+    app = g.build_app(g.make_checkpointer(ws / "graph.db"))
+    _role_invoke(ws, app, cfg, task_id)
+    app.invoke(Command(resume="approved"), cfg)  # G3 → retro
+
+    expected = {
+        "requirements": "model-requirements",
+        "design": "model-design",
+        "prototype": "model-prototype",
+        "implement_api": "model-implement",
+        "review": "model-review",
+        "retro": "model-retro",
+    }
+    actual = {row["agent_role"]: row["model"] for row in db.execute(
+        "SELECT agent_role, model FROM cost_ledger WHERE task_id=?", (task_id,))}
+    check("完整图执行中六类 Agent 均使用各自模型并正确入账",
+          all(actual.get(role) == model for role, model in expected.items()), str(actual))
+    check("run_codex 实际收到六类独立模型参数",
+          set(expected.values()).issubset(set(calls)), str(calls))
+    check("test/deploy 保留角色配置但当前不触发 LLM 调用",
+          "model-test" not in calls and "model-deploy" not in calls
+          and "test" not in actual and "deploy" not in actual)
+
+
 CASES = {
     "AC-01": ac01, "AC-02": ac02, "AC-02b": ac02b, "AC-02c": ac02c, "AC-02d": ac02d,
     "AC-02e": ac02e,
@@ -2368,6 +2459,7 @@ CASES = {
     "ROLE-01": role01, "ROLE-02": role02,
     "CONSOLE-01": console01,
     "CONFIG-01": config01,
+    "MODEL-01": model01,
     "PROTOTYPE-01": prototype01,
     "PROMPT-01": prompt01,
     "EVAL-01": eval01,

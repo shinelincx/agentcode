@@ -2,6 +2,17 @@
 
 /* 设置页：角色 / 预算 / 门禁 / 部署 / 审批 / 路径（GET/POST /api/config，按项目） */
 
+const AGENT_MODELS = [
+  ['requirements', '需求 Agent · requirements', '原始需求与图片 → 标准需求'],
+  ['design', '设计 Agent · design', '架构方案、文件归属与验收映射'],
+  ['prototype', '原型 Agent · prototype', '界面原型与验收映射'],
+  ['review', '审查 Agent · review', '独立代码审查（review.codex 启用时）'],
+  ['implement', '实现 Agent · implement', '前后端 lane 实现与门禁修复'],
+  ['test', '测试 Agent · test', '预留：当前只执行测试命令，不调用 LLM'],
+  ['deploy', '部署 Agent · deploy', '预留：当前只执行部署命令，不调用 LLM'],
+  ['retro', '复盘 Agent · retro', '复盘生成（retro.generate 启用时）'],
+];
+
 const SettingsView = {
   cfg: null, meta: {}, editable: false, file: '', loadingFor: '',
 
@@ -51,6 +62,16 @@ const SettingsView = {
         value="${esc(v ?? '')}" ${dis}></label>`;
   },
 
+  agentModel(role, label, hint) {
+    const configured = this.get('model.roles');
+    if (configured && Object.prototype.hasOwnProperty.call(configured, role)) {
+      return this.field(`model.roles.${role}`, label, { hint });
+    }
+    return `<label class="field"><span>${esc(label)}
+      <span class="hint">${esc(hint)}；未声明独立配置，继承默认模型</span></span>
+      <input value="${esc(this.get('model.default') || '')}" disabled></label>`;
+  },
+
   checks(group, label, options) {
     const cur = this.get(group) || [];
     const dis = this.editable ? '' : 'disabled';
@@ -84,10 +105,17 @@ const SettingsView = {
           this.field('executor.primary', '主执行器', { options: m.executors || [] })
           + this.field('executor.fallback', '备用执行器', { options: m.executors || [] })
           + this.field('executor.codex_home', 'Codex 凭据目录', { hint: '须含 auth.json' }))}
-        ${this.section('模型路由 · model',
-          this.field('model.default', '默认模型')
-          + this.field('model.degraded', '降级模型')
+        ${this.section('模型路由 · 全局策略',
+          this.field('model.default', '默认模型', { hint: '角色未单独配置时的回退' })
+          + this.field('model.degraded', '降级模型', { hint: 'DEGRADED 时用于非强角色' })
           + this.checks('model.strong_roles', '永不降级的角色', m.roles || []))}
+        ${this.section('Agent 独立模型 · model.roles',
+          '<div class="field full"><span>生效规则</span><div class="hint">'
+          + 'NORMAL / ALERT 使用各角色独立模型；DEGRADED 时非强角色切换为全局降级模型，'
+          + '强角色继续使用自己的模型。未声明的角色继承默认模型；已声明配置须填写非空模型名。'
+          + '</div></div>'
+          + AGENT_MODELS.map(([role, label, hint]) => this.agentModel(role, label, hint)).join(''),
+          '<span class="meta-text">按当前项目保存</span>')}
         ${this.section('预算边界 · budget',
           this.field('budget.monthly_quota', '月度配额（calls）', { type: 'number' })
           + this.field('budget.max_usage_per_task', '单任务上限 U', { type: 'number' })

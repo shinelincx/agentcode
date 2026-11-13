@@ -96,6 +96,22 @@ def validate(config: dict) -> list[str]:
             errors.append(f"executor.codex_home 缺少 auth.json：{home}")
 
     model = config.get("model") or {}
+    for key in ("default", "degraded"):
+        value = model.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            errors.append(f"model.{key} 须为非空字符串")
+    role_models = model.get("roles")
+    if role_models is not None:
+        if not isinstance(role_models, dict):
+            errors.append("model.roles 须为映射（角色名 → 模型名）")
+        else:
+            unknown = [str(role) for role in role_models if str(role) not in KNOWN_ROLES]
+            if unknown:
+                errors.append(f"model.roles 含未知角色：{unknown}"
+                              f"（已知 {list(KNOWN_ROLES)}）")
+            for role, value in role_models.items():
+                if role in KNOWN_ROLES and (not isinstance(value, str) or not value.strip()):
+                    errors.append(f"model.roles.{role} 须为非空字符串")
     strong = model.get("strong_roles")
     if strong is not None:
         if not isinstance(strong, list):

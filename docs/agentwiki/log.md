@@ -580,3 +580,12 @@
 - 验证：`ac_regression` 295 条 PASS=293 FAIL=0 SKIP=2（新增驳回缺理由 400、带理由 202、理由入账+requirements_revise 留痕）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；8879 浏览器核对驳回模态与无 JS 错误。
 - 未验证：真模型在真实驳回理由下「判断不修订」的分支；G3 驳回回实现节点时理由未注入实现 prompt（实现走设计产物，超出本轮范围）。
 - 文档：更新 [[wiki/平台看板]]（R1 小节、端点、防护、验证证据）；[[index]] 条目描述更新。
+
+## [2026-11-13] feat | 逐 Agent 独立模型配置与运行时路由
+- 触发：用户指出方案要求各 Agent 模型独立配置，但设置页只有全局模型策略，要求优化。
+- 配置与运行时：`project.yaml` 新增 `model.roles.<role>`；`config_store` 校验 8 个已知角色及非空模型名；`graph.route_model` 在 NORMAL/ALERT 与 DEGRADED 强角色下按角色覆盖、缺省回退 default，DEGRADED 非强角色仍走 degraded。requirements/design/prototype/implement/review/retro 的实际调用贯通；test/deploy 当前不调 LLM，页面明确标为预留。
+- 页面与项目：设置页拆为「模型路由 · 全局策略」和「Agent 独立模型 · model.roles」，展示 8 个角色的中文职责、独立输入与生效规则。river/proj-b 均补齐角色节点且初值沿用 `gpt-6.1-terra`；旧项目未声明角色时显示默认继承的只读字段，不绕过只改既有节点的约束。
+- 回归：新增 MODEL-01，以 stub codex 跑完整图并捕获 `run_codex` 实参及账本，证明六类 LLM 角色使用各自模型、test/deploy 不触发 LLM。专项 CONFIG-01+MODEL-01 24/24；全量 `ac_regression` 300 条 PASS=298 FAIL=0 GAP=0 SKIP=2；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；Python/JS 语法与两个项目 YAML 校验通过。
+- 浏览器与服务：重启 8879 旧监听进程加载后端修改；`#/settings` 实测 8 字段及两列布局、临时模型值保存→重载保持→还原、river/proj-b 配置源切换，无横向溢出和 JavaScript 错误。临时值最终已还原为 `gpt-6.1-terra`。
+- 边界：未调用真实供应方验证用户填写的模型名是否受支持；独立配置只影响下一次节点调用，不回溯历史调用。两个 SKIP 为既有外部环境场景，非本次失败。
+- 文档：更新 [[wiki/角色配置]]、[[wiki/平台看板]]、[[wiki/节点规则]] 与 [[index]]，追加本日志；25 个 Markdown 严格 UTF-8 解码通过，5 个变更文档的 Wiki/相对文件链接检查无错误。

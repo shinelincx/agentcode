@@ -709,19 +709,23 @@ def review_g2(state: DeliveryState) -> Command:
 
 
 def route_model(budget_state: str, role: str | None = None) -> str:
-    """角色降级路由（AC-13 ②）：DEGRADED 时非强角色走降级档，其余用默认档。
+    """按角色选模型；缺省继承默认档，DEGRADED 时非强角色仍强制降级。
 
-    模型名与强角色集来自 project.yaml model 段（控制台可配置，C-016）。
+    model.roles.<role> 是 NORMAL/ALERT 及强角色的独立配置；旧项目没有该映射时
+    行为与原先一致。模型名、角色覆盖与强角色集均来自 project.yaml。
     """
     model = _project_config().get("model") or {}
-    default = str(model.get("default") or "gpt-6.1-terra")
-    degraded = str(model.get("degraded") or "gpt-6.1-sol")
+    default = str(model.get("default") or "gpt-6.1-terra").strip() or "gpt-6.1-terra"
+    degraded = str(model.get("degraded") or "gpt-6.1-sol").strip() or "gpt-6.1-sol"
+    role_models = model.get("roles")
+    configured = role_models.get(role) if isinstance(role_models, dict) and role else None
+    selected = str(configured or default).strip() or default
     strong = model.get("strong_roles")
     strong_roles = ([str(item) for item in strong] if isinstance(strong, list)
                     else ["requirements", "design", "review"])
     if budget_state == "DEGRADED" and role not in strong_roles:
         return degraded
-    return default
+    return selected
 
 
 def _lanes_from_design(design_path: Path, requirements_path: Path | None,
