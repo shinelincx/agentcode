@@ -523,3 +523,11 @@
 - 验证：本地浅路径复跑（TEMP=C:\acsim）ac_regression 282 条 PASS=280 FAIL=0 SKIP=2；prompt_eval 17/17、graph_smoke 12/12、smoke_test 20/20；本地 gitleaks git 全历史 no leaks。第 2 次远端运行 43375084226（c3f7947）checks + gitleaks 双 success。
 - 未验证/未完成：KILL-01 在 Linux 跳过，POSIX killpg 无 CI 覆盖；未核查 GitHub Secret Scanning / 推送保护；origin HTTPS 直连仍需网络放行。
 - 文档：新增 [[wiki/C3-CI首跑]]；[[wiki/P2规划]] C3 标完成；[[wiki/节点规则]] 凭据扫描 CI 行与 CI 接入节更新；[[index]] 增加条目。
+
+## [2026-11-13] verify | C4 镜像扫描改由 Actions 执行并出结果
+- 本地阻断：winget 装 trivy 成功，但漏洞库拉取失败（mirror.gcr.io / registry-1.docker.io 不可达，ghcr.io 133MB blob 5 分钟超时）；gh release download 也因 objects.githubusercontent.com 不可达失败。
+- 新增 .github/workflows/image-scan.yml（workflow_dispatch，矩阵覆盖 3 个 pin 镜像，severity=HIGH,CRITICAL，exit-code=0 只记录）。首跑失败：trivy-action 标签 0.28.0 不存在，改 v0.36.0。
+- 运行 43377737668 三 job success。结果：postgres 31H/0C + 25H/1C（CVE-2025-68121 stdlib）、nginx 67H/3C（CVE-2026-111497 brotli-libs、CVE-2026-31789 libcrypto3/libssl3）、node 7H/0C + 21H/1C（CVE-2026-59873 tar）；合计 151 HIGH / 5 CRITICAL，均给出修复版本。
+- 结论修正：C4「扫描无高危」不成立（上游基座库存问题，非 digest pin 引入）；基座升级与阈值策略为后续项，当前 exit-code=0 不设门禁。
+- 未验证：artifact 未上传（下载域名不可达，证据取自 job 日志）；未做两次 --no-cache 构建的 bit-for-bit 比对。
+- 文档：更新 [[wiki/C4-staging镜像治理]]（扫描结果表、CRITICAL 明细、冲突与未知）、[[wiki/P2规划]] C4 行、[[index]] 条目。
