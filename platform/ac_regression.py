@@ -1256,8 +1256,18 @@ def console01(ws: Path):
         status_css, css = req("GET", "/styles.css")
         check("前后端分离：静态前端资源与运行模式接口可用",
               status_mode == 200 and mode.get("control") is True
-              and status_js == 200 and "fetch('/api/overview'" in js
+              and status_js == 200 and "getJSON('/api/overview')" in js
               and status_css == 200 and "--brand" in css)
+        status_proj, projinfo = req("GET", "/api/projects")
+        check("多项目：项目列表接口可用",
+              status_proj == 200 and isinstance(projinfo.get("projects"), list)
+              and projinfo.get("default") == "river")
+        status_bad, _ = req("GET", "/api/overview?project=..%2F..%2Fetc")
+        check("多项目：非法/未知项目返回 404", status_bad == 404)
+        status_search, found = req("GET", f"/api/search?q={tid[:8]}")
+        check("查询：按关键字检索任务",
+              status_search == 200
+              and any(t["id"] == tid for t in found.get("tasks", [])))
         status, _ = req("POST", "/api/task/start", {"task_id": tid})
         check("缺少 X-Control 的写请求被拒（403）", status == 403)
         status, created2 = req("POST", "/api/intake", {
@@ -1495,10 +1505,11 @@ def config01(ws: Path):
               and config_store.load(path)["budget"]["monthly_quota"] == 26000
               and data["runtime_refreshed"] and g.QUOTA == 26000)
         status, page = req("GET", "/config")
-        status_js, page_js = req("GET", "/config.js")
-        check("配置页面可访问且含保存入口",
-              status == 200 and "保存配置" in page
-              and status_js == 200 and "budget.monthly_quota" in page_js)
+        status_js, page_js = req("GET", "/settings.js")
+        check("设置页入口可访问且含保存与预算字段",
+              status == 200 and "设置" in page
+              and status_js == 200 and "保存配置" in page_js
+              and "budget.monthly_quota" in page_js)
     finally:
         srv.shutdown()
         srv.server_close()

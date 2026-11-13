@@ -552,3 +552,12 @@
 - 目视修复：`.btn` 的 `display:inline-flex` 覆盖 `hidden`，只读模式仍露出「＋ 新建需求」；加 `[hidden]{display:none!important}` 后复核通过。
 - 未验证：控制台模式（按钮/审批/弹窗）未做浏览器自动化交互回归；未引入前端构建链与单元测试。
 - 文档：更新 [[wiki/平台看板]]（实现/端点/界面重设计/验证证据/限制）；无新增页面，index 条目描述仍适用。
+
+## [2026-11-13] feat | 控制台改左右菜单并支持多项目
+- 触发：用户指示「继续优化改为左右菜单的web管理界面模式，总览页、操作页、设置、查询等页面、另外当前是多项目，应该按多项目进行设计」。
+- 前端：`platform/console/index.html` 重写为侧边栏外壳（品牌 + 项目下拉 + 六项导航 + 模式/账本状态），右侧为页头 + 视图区；`app.js` 改为 hash 路由单页应用（`#/overview`、`#/tasks`、`#/approvals`、`#/actions`、`#/query`、`#/settings`），`settings.js` 承载设置页 7 分区表单；删除已并入单页的 `intake.html/js`、`config.html/js`，`/intake`、`/config` 由后端回落到 `index.html`。轮询只在总览/任务/待审批重建视图，操作页仅刷新动态片段以免清空表单。
+- 后端：新增 `list_projects()` / `project_paths()`（单段目录名 + `resolve()` + `relative_to(PROJECTS_DIR)` 防穿越）与 `GET /api/projects`、`GET /api/search`；所有 API 支持 `?project=` / 请求体 `project`，`/api/mode` 增 `default_project`；`POST /api/config`、`/api/intake` 与任务动作都写到目标项目，控制台按项目缓存 `ControlRunner`，图执行统一加进程级 `_GRAPH_LOCK`（`graph.RIVER_WS` 是全局状态）。
+- 安全：项目名与静态路径仍做越界校验；未知/非法项目 404；写请求防护（`X-Control: 1` + Origin 白名单 + ≤64KB）不变。
+- 验证：`ac_regression` 286 条 PASS=284 FAIL=0 SKIP=2（新增项目列表、非法项目 404、关键字查询三条断言；CONSOLE-01/CONFIG-01 文案断言随迁）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17。`--control` 实例 8891 浏览器目视：六项导航与项目下拉正常，设置页表单与「保存配置」可见，切到 proj-b 后任务数 12→1、状态栏显示 proj-b/state.db、总览同步刷新，控制台无 JS 错误。
+- 未验证：「保存配置」提交、审批弹窗与产物 iframe 的浏览器自动化交互；两个项目并行跑图（当前串行）；与 CLI 混用的跨进程互斥。
+- 文档：更新 [[wiki/平台看板]]（信息架构、多项目路由与隔离、端点、验证证据、限制/同步演进修正）；[[index]] 条目描述更新。

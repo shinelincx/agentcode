@@ -116,6 +116,61 @@ def load_budget_config(path: Path) -> dict:
     return cfg
 
 
+def list_projects() -> list[dict]:
+    """已注册项目：projects/<name>/ 下存在 project.yaml 或 state.db 即纳入。"""
+    items = []
+    if not PROJECTS_DIR.is_dir():
+        return items
+    for d in sorted(PROJECTS_DIR.iterdir(), key=lambda p: p.name):
+        if not d.is_dir():
+            continue
+        yaml_path, db_path = d / "project.yaml", d / "state.db"
+        if not (yaml_path.is_file() or db_path.is_file()):
+            continue
+        cfg = load_budget_config(yaml_path)
+        items.append({"name": d.name, "label": cfg.get("project") or d.name,
+                      "db": db_path.is_file(), "yaml": yaml_path.is_file()})
+    return items
+
+
+def project_paths(name: str) -> tuple[Path, Path] | None:
+    """项目名 → (state.db, project.yaml)；仅接受单段目录名，禁止穿越。"""
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return None
+    base = PROJECTS_DIR.resolve()
+    d = (base / name).resolve()
+    try:
+        d.relative_to(base)
+    except ValueError:
+        return None
+    db_path, yaml_path = d / "state.db", d / "project.yaml"
+    if not db_path.is_file() and not yaml_path.is_file():
+        return None
+    return db_path, yaml_path
+
+
+def search_tasks(db_path: Path, keyword: str = "", status: str = "",
+                 limit: int = 100) -> list[dict]:
+    """按任务 id / 需求关键字与状态查询（只读，最多 limit 条）。"""
+    if not db_path.exists():
+        return []
+    db = ro_connect(db_path)
+    try:
+        sql = ("SELECT t.id, t.requirement, t.priority, t.status, t.current_node, "
+               "t.retry_count, t.created_at, t.updated_at, "
+               "(SELECT COALESCE(SUM(calls),0) FROM cost_ledger c WHERE c.task_id=t.id) AS calls "
+               "FROM tasks t WHERE (t.id LIKE ? OR t.requirement LIKE ?)")
+        args: list = [f"%{keyword}%", f"%{keyword}%"]
+        if status:
+            sql += " AND t.status=?"
+            args.append(status)
+        sql += " ORDER BY t.created_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        return _rows(db, sql, tuple(args))
+    finally:
+        db.close()
+
+
 def ro_connect(db_path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3)
     db.row_factory = sqlite3.Row
@@ -410,10 +465,15 @@ def _ensure_approval(db_path: Path, task_id: str, gate: str,
         db.close()
 
 
+# 图执行依赖 graph 模块的全局 RIVER_WS / 预算，跨项目的动作必须串行
+_GRAPH_LOCK = threading.Lock()
+
+
 class ControlRunner:
     """串行执行图动作：start / decide / rerun。
 
     单线程队列避免同一账本上的并发写与 checkpointer 竞争；HTTP 线程只入队。
+    多项目共用 _GRAPH_LOCK，保证同一时刻只有一个项目在跑图。
     """
 
     def __init__(self, ws: Path, db_path: Path):
@@ -500,9 +560,10 @@ class ControlRunner:
             with self._lock:
                 job.update(status="running", started_at=_now())
             try:
-                message = self.execute(job["task_id"], job["action"],
-                                       decision=job["decision"], by=job["by"],
-                                       entry=job.get("entry", ""))
+                with _GRAPH_LOCK:
+                    message = self.execute(job["task_id"], job["action"],
+                                           decision=job["decision"], by=job["by"],
+                                           entry=job.get("entry", ""))
                 status = "done"
             except ControlError as exc:
                 message, status = str(exc), "failed"
@@ -581,11 +642,41 @@ class ControlRunner:
 class Handler(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_DB
     yaml_path: Path = DEFAULT_YAML
+    default_project: str = DEFAULT_PROJECT
     intake_enabled: bool = False
     control_enabled: bool = False
     intake_ws: Path = DEFAULT_DB.parent
     runner: ControlRunner | None = None
+    runners: dict[str, ControlRunner] = {}
+    _runners_lock = threading.Lock()
     max_body: int = 64 * 1024
+
+    def _project(self, query=None, payload=None) -> tuple[str, Path, Path] | None:
+        """解析请求的目标项目；缺省用默认项目（保留 --db 覆盖与测试桩）。"""
+        name = ""
+        if payload is not None:
+            name = str(payload.get("project") or "").strip()
+        if not name and query is not None:
+            name = (query.get("project") or [""])[0].strip()
+        name = name or self.default_project
+        if name == self.default_project:
+            return self.default_project, self.db_path, self.yaml_path
+        found = project_paths(name)
+        if found is None:
+            return None
+        return name, found[0], found[1]
+
+    def _runner_for(self, name: str, db_path: Path) -> ControlRunner:
+        """按项目取执行器（各自单线程队列；图执行由 _GRAPH_LOCK 全局串行）。"""
+        if name == self.default_project and self.runner is not None:
+            return self.runner
+        key = str(db_path.resolve())
+        with Handler._runners_lock:
+            runner = self.runners.get(key)
+            if runner is None:
+                runner = ControlRunner(db_path.parent, db_path)
+                self.runners[key] = runner
+            return runner
 
     def _send(self, code: int, body: bytes, ctype: str):
         self.send_response(code)
@@ -602,20 +693,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
+        target = self._project(query=query)
+        if target is None and path not in ("/api/mode", "/api/projects", "/healthz"):
+            self._json(404, {"error": "未知项目（projects/<name> 不存在）"})
+            return
         if path == "/api/mode":
             mode = ("控制台" if self.control_enabled
                     else "只读 + 录入" if self.intake_enabled else "只读")
             self._json(200, {"control": self.control_enabled,
-                             "intake": self.intake_enabled, "mode": mode})
+                             "intake": self.intake_enabled, "mode": mode,
+                             "default_project": self.default_project})
+        elif path == "/api/projects":
+            self._json(200, {"projects": list_projects(),
+                             "default": self.default_project})
         elif path == "/api/config":
+            proj, _, yaml_path = target
             try:
                 import config_store
-                cfg = config_store.load(self.yaml_path)
+                cfg = config_store.load(yaml_path)
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
                 return
             self._json(200, {
-                "file": str(self.yaml_path),
+                "project": proj,
+                "file": str(yaml_path),
                 "config": cfg,
                 "editable": bool(self.control_enabled),
                 "meta": {
@@ -626,23 +727,36 @@ class Handler(BaseHTTPRequestHandler):
                     "gate_commands": sorted(
                         ((cfg.get("tech_stack") or {}).get("gate_commands") or {})),
                 },
-                "audit": _recent_config_audit(self.yaml_path.parent / "config-audit.jsonl"),
+                "audit": _recent_config_audit(yaml_path.parent / "config-audit.jsonl"),
             })
         elif path == "/healthz":
             self._send(200, b'{"ok":true}', "application/json")
         elif path == "/api/overview":
-            data = snapshot(self.db_path, self.yaml_path)
-            self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"),
-                       "application/json; charset=utf-8")
+            proj, db_path, yaml_path = target
+            data = snapshot(db_path, yaml_path)
+            data["project_name"] = proj
+            self._json(200, data)
         elif path == "/api/jobs":
-            jobs = self.runner.jobs() if self.runner else []
-            self._json(200, {"jobs": jobs})
+            proj, db_path, _ = target
+            jobs = self._runner_for(proj, db_path).jobs() if self.control_enabled else []
+            self._json(200, {"project": proj, "jobs": jobs})
+        elif path == "/api/search":
+            proj, db_path, _ = target
+            keyword = (query.get("q") or [""])[0].strip()
+            status = (query.get("status") or [""])[0].strip()
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError:
+                limit = 100
+            self._json(200, {"project": proj,
+                             "tasks": search_tasks(db_path, keyword, status, limit)})
         elif path == "/api/task/detail":
             task_id = (query.get("task_id") or [""])[0].strip()
             if not task_id:
                 self._json(400, {"error": "缺少 task_id"})
                 return
-            data = task_detail(self.db_path, task_id)
+            _, db_path, _ = target
+            data = task_detail(db_path, task_id)
             self._json(404 if "error" in data else 200, data)
         elif path == "/api/artifact":
             task_id = (query.get("task_id") or [""])[0].strip()
@@ -650,7 +764,8 @@ class Handler(BaseHTTPRequestHandler):
             if not task_id or not kind:
                 self._json(400, {"error": "缺少 task_id 或 kind"})
                 return
-            data = artifact_content(self.db_path, task_id, kind)
+            _, db_path, _ = target
+            data = artifact_content(db_path, task_id, kind)
             self._json(404 if "error" in data else 200, data)
         elif path == "/intake" and not self.intake_enabled:
             self._json(404, {"error": "not found"})
@@ -663,7 +778,7 @@ class Handler(BaseHTTPRequestHandler):
         """静态前端：仅服务 console/ 内的文件（拒绝目录穿越），按扩展名取 Content-Type。"""
         rel = path.lstrip("/") or "index.html"
         if rel in ("intake", "config"):
-            rel += ".html"
+            rel = "index.html"  # 兼容旧入口：统一由 SPA 按路径初始化对应视图
         try:
             root = CONSOLE_DIR.resolve()
             target = (root / rel).resolve()
@@ -704,7 +819,8 @@ class Handler(BaseHTTPRequestHandler):
         return payload, 200, ""
 
     def do_POST(self):  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path, query = parsed.path, parse_qs(parsed.query)
         if path == "/api/config":
             if not self.control_enabled:
                 self._json(404, {"error": "not found（配置写入需 --control 启动）"})
@@ -716,11 +832,15 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 self._json(code, {"error": error})
                 return
+            target = self._project(query=query, payload=payload)
+            if target is None:
+                self._json(404, {"error": "未知项目"})
+                return
+            proj, _, yaml_path = target
             import config_store
             actor = str(payload.get("by") or "console").strip()[:60] or "console"
             try:
-                result = config_store.apply_updates(
-                    self.yaml_path, payload.get("updates"), actor)
+                result = config_store.apply_updates(yaml_path, payload.get("updates"), actor)
             except config_store.ConfigError as exc:
                 self._json(400, {"error": str(exc)})
                 return
@@ -730,11 +850,15 @@ class Handler(BaseHTTPRequestHandler):
             refreshed = False
             try:
                 import graph
-                graph.refresh_runtime_config()
+                with _GRAPH_LOCK:
+                    graph.RIVER_WS = yaml_path.parent
+                    graph.USAGE_BUFFER = yaml_path.parent / "usage_buffer.jsonl"
+                    graph.refresh_runtime_config()
                 refreshed = True
             except Exception as exc:
                 print(f"[config] runtime refresh failed: {exc}", file=sys.stderr)
             self._json(200, {
+                "project": proj,
                 "changed": result["changed"],
                 "config": result["config"],
                 "runtime_refreshed": refreshed,
@@ -753,8 +877,13 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 self._json(code, {"error": error})
                 return
+            target = self._project(query=query, payload=payload)
+            if target is None:
+                self._json(404, {"error": "未知项目"})
+                return
+            proj, db_path, _ = target
             try:
-                result = create_task_from_payload(self.db_path, self.intake_ws, payload)
+                result = create_task_from_payload(db_path, db_path.parent, payload)
             except IntakeError as exc:
                 self._json(400, {"error": str(exc)})
                 return
@@ -762,6 +891,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": f"创建失败：{exc}"})
                 return
             self._json(201, {
+                "project": proj,
                 "task_id": result["task_id"],
                 "requirement_path": result["path"],
                 "priority": result["priority"],
@@ -770,7 +900,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path in ("/api/task/start", "/api/task/decide", "/api/task/rerun"):
-            if not self.control_enabled or self.runner is None:
+            if not self.control_enabled:
                 self._json(404, {"error": "not found（需 --control 启动）"})
                 return
             if not self._write_allowed():
@@ -780,6 +910,12 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 self._json(code, {"error": error})
                 return
+            target = self._project(query=query, payload=payload)
+            if target is None:
+                self._json(404, {"error": "未知项目"})
+                return
+            proj, db_path, _ = target
+            runner = self._runner_for(proj, db_path)
             task_id = str(payload.get("task_id") or "").strip()
             if not task_id:
                 self._json(400, {"error": "缺少 task_id"})
@@ -796,12 +932,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "缺少重跑起始节点 from"})
                 return
             try:
-                job = self.runner.enqueue(task_id, action, decision=decision, by=by,
-                                          entry=entry)
+                job = runner.enqueue(task_id, action, decision=decision, by=by,
+                                     entry=entry)
             except ControlError as exc:
                 self._json(exc.code, {"error": str(exc)})
                 return
-            self._json(202, job)
+            self._json(202, {**job, "project": proj})
             return
 
         self._json(404, {"error": "not found"})
@@ -842,6 +978,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps(snapshot(db_path, yaml_path), ensure_ascii=False, indent=2))
         return 0
     Handler.db_path, Handler.yaml_path = db_path, yaml_path
+    Handler.default_project = args.project
     Handler.intake_ws = db_path.parent
     control = args.control or args.intake
     if control:
