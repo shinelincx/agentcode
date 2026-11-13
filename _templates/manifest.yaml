@@ -1,0 +1,91 @@
+# Prompt 模板清单 · A1 模板层
+# SemVer 版本：每次改动模板内容（参数新增/删除/语义变更）必须 bump
+# 参数标记：required=缺失时报错；optional=缺失时 $param 保留在输出中（极少数情况用）
+# 渲染入口：platform/templates.py render(name, **params)
+# 逃生口：LANES[].prompt 显式给出时跳过 implement-lane 模板直接使用
+# 1.1.0：统一六段式（Role/Context/Task/Constraints/Output contract/Self-check）；
+#        新增 project_context（渲染期注入项目事实与记忆）；gate-fix 增 failed_files/attempt。
+# 1.2.0：C 层新增 review-diff（自动审查）与 retro-gen（复盘生成）两个模板。
+# 1.3.0：review-diff 增 files_content/gate_results；implement-lane 与 gate-fix 增 workdir_hint（G-02 lane 根 cwd）。
+
+version: "1.3.0"
+
+templates:
+  implement-lane:
+    version: "1.2.0"
+    file: "prompts/implement-lane.tmpl"
+    purpose: "Worker lane 实现指令（be/fe 共用外壳，lane_instruction 为自由文本）"
+    params:
+      branch: { required: true,  desc: "git 分支名（如 feat/task-004-startedat-be）" }
+      lane_instruction: { required: true, desc: "lane 特有指令——改哪些文件、加什么字段、函数签名怎么变" }
+      scope: { required: false, desc: "文件范围列表，渲染为单行括号内逗号分隔" }
+      task_id: { required: false, desc: "任务 id（前 8 位即可），用于 commit message 关联" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+      workdir_hint: { required: false, desc: "Worker 工作目录说明（lane 根 cwd 与前缀去除规则）" }
+
+  gate-fix:
+    version: "1.2.0"
+    file: "prompts/gate-fix.tmpl"
+    purpose: "门禁失败修正指令（graph.py 修正循环用）"
+    params:
+      gate_cmd: { required: true, desc: "失败的门禁命令（如 npm run typecheck）" }
+      gate_output_tail: { required: true, desc: "门禁输出尾部（默认 1200 字符）" }
+      failed_files: { required: true, desc: "本 lane 当前改动文件列表（逗号分隔）" }
+      attempt: { required: true, desc: "当前节点尝试次数（node_runs 计数 +1）" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+      workdir_hint: { required: false, desc: "Worker 工作目录说明（lane 根 cwd 与前缀去除规则）" }
+
+  requirements-gen:
+    version: "1.1.0"
+    file: "prompts/requirements-gen.tmpl"
+    purpose: "A2 需求节点 Agent 产出 REQUIREMENTS.md"
+    params:
+      raw_requirement: { required: true, desc: "原始需求描述（一句话或一段）" }
+      task_id: { required: true, desc: "任务 id" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+
+  design-gen:
+    version: "1.1.0"
+    file: "prompts/design-gen.tmpl"
+    purpose: "A2 设计节点 Agent 产出 DESIGN.md"
+    params:
+      requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
+      task_id: { required: true, desc: "任务 id" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+
+  prototype-gen:
+    version: "1.1.0"
+    file: "prompts/prototype-gen.tmpl"
+    purpose: "原型/UI 角色 Agent 产出 index.html + PROTOTYPE.md（专属原型目录）"
+    params:
+      requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
+      design_content: { required: true, desc: "DESIGN.md 全文" }
+      prototype_dir: { required: true, desc: "原型输出目录（Agent 的写入范围）" }
+      task_id: { required: true, desc: "任务 id（前 8 位）" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+
+  review-diff:
+    version: "1.2.1"
+    file: "prompts/review-diff.tmpl"
+    purpose: "自动审查（review.codex=true）：按需求/设计审交付 diff，PASS/FAIL 决定是否进入测试"
+    params:
+      diff_content: { required: true, desc: "交付 diff 正文（超长已截断）" }
+      requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
+      design_content: { required: true, desc: "DESIGN.md 全文" }
+      task_id: { required: true, desc: "任务 id（前 8 位）" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
+      files_content: { required: false, desc: "变更文件的当前完整内容（diff 未覆盖的行也需核验 AC 时使用）" }
+      gate_results: { required: false, desc: "implement 阶段门禁结果（typecheck/unit 等，Markdown 表格）" }
+
+  retro-gen:
+    version: "1.2.0"
+    file: "prompts/retro-gen.tmpl"
+    purpose: "复盘生成（retro.generate=true）：产出 RETRO.md（不影响交付终态）"
+    params:
+      requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
+      design_content: { required: true, desc: "DESIGN.md 全文" }
+      test_report: { required: true, desc: "TEST_REPORT.md 全文或（未生成）" }
+      deploy_report: { required: true, desc: "DEPLOY_REPORT.md 全文或（未生成）" }
+      change_summary: { required: true, desc: "交付改动摘要（文件清单 + diff stat）" }
+      task_id: { required: true, desc: "任务 id（前 8 位）" }
+      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }

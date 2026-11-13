@@ -1,0 +1,265 @@
+# B 层黄金用例：渲染层做结构与内容断言；--live 时再用真实 codex 校验产出结构。
+# 约定：assert 检查渲染后的 prompt；output_assert 仅在 --live 下检查模型产出的 Markdown。
+# max_chars 用于成本观察（prompt 膨胀报警），charcount 与估算 tokens 会写入评测报告。
+version: 1
+cases:
+  # ---------- requirements-gen ----------
+  - id: req-basic
+    template: requirements-gen
+    params:
+      task_id: eval-req
+      raw_requirement: 为任务列表增加按状态筛选，并记住用户上次选择的筛选条件
+    assert:
+      contains: ["Write REQUIREMENTS.md", "## 非目标", "AC-1", "## Self-check"]
+      not_contains: ["esbuild spawn EPERM"]
+      max_chars: 6000
+    output_assert:
+      contains: ["## 需求", "## 验收标准", "## 非目标"]
+      min_matches: {"AC[-\\s]?\\d+": 2}
+      max_chars: 50000
+
+  - id: req-english
+    template: requirements-gen
+    params:
+      task_id: eval-req-en
+      raw_requirement: Add CSV export for the task list, including the status filter
+    assert:
+      contains: ["## 需求", "## 验收标准", "## 非目标", "## Output contract"]
+      max_chars: 6000
+
+  - id: req-ui
+    template: requirements-gen
+    params:
+      task_id: eval-req-ui
+      raw_requirement: 任务详情页增加深色模式切换按钮，刷新后保持选择
+    assert:
+      contains: ["AC-N", "## Constraints", "## Self-check"]
+      max_chars: 6000
+
+  # ---------- design-gen ----------
+  - id: design-basic
+    template: design-gen
+    params:
+      task_id: eval-design
+      requirements_content: |
+        # REQUIREMENTS · task eval-design
+        ## 需求
+        任务列表支持按状态筛选。
+        ## 验收标准
+        - AC-1: 选择状态后列表只显示该状态任务
+        - AC-2: 刷新后保留筛选条件
+        ## 非目标
+        不做服务端分页。
+    assert:
+      contains: ["Write DESIGN.md", "## 文件归属表", "## 实现策略", "## 验收映射", "AC-N → path/to/file"]
+      max_chars: 7000
+    output_assert:
+      contains: ["## 文件归属表", "## 实现策略", "## 验收映射"]
+      min_matches: {"AC[-\\s]?\\d+": 2}
+      max_chars: 50000
+
+  - id: design-english
+    template: design-gen
+    params:
+      task_id: eval-design-en
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-en
+        ## 需求
+        Export CSV.
+        ## 验收标准
+        - AC-1: exported file contains all filtered rows
+        ## 非目标
+        No scheduled exports.
+    assert:
+      contains: ["## 验收映射", "AC-1", "∅"]
+      max_chars: 7000
+
+  - id: design-ui
+    template: design-gen
+    params:
+      task_id: eval-design-ui
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-ui
+        ## 需求
+        深色模式切换。
+        ## 验收标准
+        - AC-1: 切换后主题即时生效
+        ## 非目标
+        不跟随系统主题。
+    assert:
+      contains: ["lane", "## 实现策略", "## 验收映射"]
+      max_chars: 7000
+
+  # ---------- prototype-gen ----------
+  - id: proto-zh
+    template: prototype-gen
+    params:
+      task_id: eval-proto
+      requirements_content: |
+        # REQUIREMENTS
+        ## 需求
+        深色模式切换。
+        ## 验收标准
+        - AC-1: 切换后页面变暗
+      design_content: |
+        # DESIGN
+        ## 文件归属表
+        | apps/web/src/theme.tsx | fe |
+      prototype_dir: eval-prototype-dir
+    assert:
+      contains: ["Prototype Agent", "Prototype directory: eval-prototype-dir", "<!DOCTYPE html>", "## 验收映射", "PROTOTYPE.md"]
+      max_chars: 7000
+
+  - id: proto-en
+    template: prototype-gen
+    params:
+      task_id: eval-proto-en
+      requirements_content: "# REQUIREMENTS\n## 需求\nCSV export button.\n"
+      design_content: "# DESIGN\n## 文件归属表\n| apps/web/src/export.tsx | fe |\n"
+      prototype_dir: eval-prototype-en
+    assert:
+      contains: ["index.html", "## 原型说明", "## 局限"]
+      max_chars: 7000
+
+  - id: proto-no-git
+    template: prototype-gen
+    params:
+      task_id: eval-proto-nogit
+      requirements_content: "# REQUIREMENTS\n## 需求\n列表页。\n"
+      design_content: "# DESIGN\n## 文件归属表\n| apps/web/src/list.tsx | fe |\n"
+      prototype_dir: eval-prototype-nogit
+    assert:
+      contains: ["do not run git", "no network assets", "Self-check"]
+      max_chars: 7000
+
+  # ---------- implement-lane ----------
+  - id: impl-be
+    template: implement-lane
+    params:
+      branch: feat/eval-be
+      lane_instruction: 在 apps/api/src/index.ts 的列表接口增加 status 过滤参数
+      scope: ["apps/api/src/**"]
+      task_id: eval-impl-be
+    assert:
+      contains: ["feat/eval-be", "apps/api/src/**", "Do not add dependencies", "out-of-scope"]
+      not_contains: ["esbuild spawn EPERM"]
+      max_chars: 6000
+
+  - id: impl-fe
+    template: implement-lane
+    params:
+      branch: feat/eval-fe
+      lane_instruction: 在 apps/web/src/app.tsx 增加状态筛选下拉框
+      scope: ["apps/web/src/**"]
+      task_id: eval-impl-fe
+    assert:
+      contains: ["feat/eval-fe", "apps/web/src/**", "## Output contract", "## Constraints"]
+      max_chars: 6000
+
+  - id: impl-multi-scope
+    template: implement-lane
+    params:
+      branch: feat/eval-multi
+      lane_instruction: 同时更新 API 类型与前端调用
+      scope: ["apps/api/src/**", "apps/web/src/**"]
+      task_id: eval-impl-multi
+    assert:
+      contains: ["apps/api/src/**", "apps/web/src/**", "## Self-check"]
+      max_chars: 6000
+
+  # ---------- gate-fix ----------
+  - id: fix-typecheck
+    template: gate-fix
+    params:
+      gate_cmd: npm run typecheck
+      gate_output_tail: "src/index.ts(12,3): error TS2304: Cannot find name 'status'"
+      failed_files: ["apps/api/src/index.ts"]
+      attempt: 2
+    assert:
+      contains: ["Attempt: 2", "apps/api/src/index.ts", "TS2304", "Do not change public interfaces", "Do not add dependencies"]
+      max_chars: 6000
+
+  - id: fix-unit
+    template: gate-fix
+    params:
+      gate_cmd: npm run test:unit
+      gate_output_tail: "FAIL src/filter.test.ts > keeps previous filter"
+      failed_files: ["apps/api/src/filter.ts", "apps/api/src/filter.test.ts"]
+      attempt: 1
+    assert:
+      contains: ["Attempt: 1", "apps/api/src/filter.ts", "did not weaken", "root cause"]
+      max_chars: 6000
+
+  - id: fix-no-files
+    template: gate-fix
+    params:
+      gate_cmd: npm run test:unit
+      gate_output_tail: ""
+      failed_files: []
+      attempt: 3
+    assert:
+      contains: ["Attempt: 3", "Files changed in this lane", "## Self-check"]
+      max_chars: 6000
+
+  # ---------- review-diff（C 层自动审查） ----------
+  - id: review-basic
+    template: review-diff
+    params:
+      task_id: eval-review
+      requirements_content: |
+        # REQUIREMENTS · task eval-review
+        ## 需求
+        任务列表支持按状态筛选。
+        ## 验收标准
+        - AC-1: 选择状态后列表只显示该状态任务
+        - AC-2: 刷新后保留筛选条件
+        ## 非目标
+        不做服务端分页。
+      design_content: |
+        # DESIGN · task eval-review
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/src/index.ts | be |
+        | apps/web/src/app.tsx | fe |
+        ## 实现策略
+        serial be → fe
+        ## 验收映射
+        - AC-1 → apps/api/src/index.ts
+        - AC-2 → apps/web/src/app.tsx
+      diff_content: |
+        diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+        +const status = req.query.status;
+        diff --git a/apps/web/src/app.tsx b/apps/web/src/app.tsx
+        +const saved = localStorage.getItem("filter");
+    assert:
+      contains: ["## 结论", "## 问题", "## 建议", "PASS", "FAIL", "AC-1", "apps/web/src/app.tsx"]
+      max_chars: 8000
+
+  # ---------- retro-gen（C 层复盘生成） ----------
+  - id: retro-basic
+    template: retro-gen
+    params:
+      task_id: eval-retro
+      requirements_content: |
+        # REQUIREMENTS · task eval-retro
+        ## 验收标准
+        - AC-1: 列表支持状态筛选
+      design_content: |
+        # DESIGN · task eval-retro
+        ## 验收映射
+        - AC-1 → apps/api/src/index.ts
+      test_report: |
+        # TEST REPORT
+        ## 结果
+        PASS · 3/3 门禁通过
+      deploy_report: |
+        # DEPLOY REPORT
+        ## 结果
+        PASS · staging 部署与检查通过
+      change_summary: |
+        - apps/api/src/index.ts
+        - apps/web/src/app.tsx
+    assert:
+      contains: ["## 结果", "## 偏差", "## 经验", "## 后续动作", "RETRO", "Self-check"]
+      max_chars: 8000

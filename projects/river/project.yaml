@@ -1,0 +1,59 @@
+# 试点项目配置 · proj-a = river（P0a 确认，2026-11-11）
+# 消费方：platform 编排器（P1）。预算模型：事后计量 + 边界控制（V2.2 §8）。
+
+project: river
+repo_path: d:\project\river
+workspace: d:\project\AgentCode\projects\river   # 账本 state.db 与 lane worktree 所在（不污染业务仓库）
+
+executor:
+  primary: codex            # npm 0.167.1（发现 A 修正后主执行器）
+  fallback: claude          # claude 2.1.197
+  codex_path: codex         # PATH 解析
+  codex_home: d:\project\AgentCode\projects\river\codex-home   # Worker 隔离 home（须含 auth.json；git 已忽略）
+
+model:
+  default: gpt-6.1-terra
+  degraded: gpt-6.1-sol     # DEGRADED 状态角色降级备选（轻档）
+  strong_roles: [requirements, design, review]   # 永不降级（V2.2 §8.4）
+
+budget:                      # 订阅模式：call_count 主单位（配额 = 订阅资源保护）
+  unit: calls
+  monthly_quota: 20000
+  max_usage_per_task: 200    # U（P1 Week 2 按 P95 x 2 校准）
+  max_inflight_tasks: 1      # N（单项目试点串行）
+  thresholds: {alert: 0.80, degraded: 0.90, paused: 1.00}
+
+gates:                       # 审批人 = 单人值守（P0a 表单 A 归档）
+  G1_requirements: {approver: user, sla_hours: 4}
+  G2_design:       {approver: user, sla_hours: 4}
+  G3_staging:      {approver: user, sla_hours: 4}
+  L1_review_weekly: {approver: user, backlog_alert: 20}
+
+review:                      # C 层自动审查（implement 之后、test 之前）
+  codex: true                # true：追加 codex 审 diff（FAIL → gate_failed，消耗 1 次调用）
+
+retro:                       # 复盘生成（G3 批准后；不影响交付终态）
+  generate: false            # true：用 codex 生成 RETRO.md（失败仅留痕）
+
+tech_stack:                  # river 门禁现成（P0a 探测结论）
+  type: npm-workspaces
+  web: apps/web              # 前端 lane
+  api: apps/api              # 后端 lane
+  gate_commands:
+    typecheck: npm run typecheck
+    unit: npm run test:unit
+    coverage: npm run test:coverage
+    e2e: npm run test:e2e
+    verify_all: npm run verify
+
+test:                        # 测试角色（独立验证，编排层执行）
+  gates: [typecheck, unit, coverage]   # 引用上方 gate_commands 的键
+
+deploy:                      # 部署角色（staging）
+  staging:
+    required: true           # 任一部署/冒烟/健康检查失败 → gate_failed（不再显式跳过）
+    commands:
+      # 必须在同一个 WSL 会话内完成 build → up → 冒烟：跨命令 WSL 会被回收，容器随之停止
+      - 'wsl -d Debian -- bash -lc "cd /mnt/d/project/river && docker compose -f docker-compose.staging.yml up -d --build && SMOKE_RESTART=1 bash infra/docker/staging-smoke.sh"'
+    healthcheck: http://localhost:8080/api/stats
+    timeout_seconds: 900

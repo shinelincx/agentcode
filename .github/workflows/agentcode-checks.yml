@@ -1,0 +1,48 @@
+name: agentcode-checks
+
+on:
+  push:
+  pull_request:
+
+# G-03：显式最小权限，不依赖 GITHUB_TOKEN 的默认宽权限
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install langgraph==1.2.4 langgraph-checkpoint-sqlite==3.1.3 pyyaml==6.0.3
+
+      # 零 token：模板渲染 + 断言 + 模板锁漂移检查（--live 需真实 codex 凭据，不进 CI）
+      - name: Prompt template eval
+        run: python platform/prompt_eval.py
+
+      - name: AC regression
+        run: python platform/ac_regression.py
+
+      - name: Graph smoke
+        run: python platform/graph_smoke.py
+
+      - name: Platform smoke
+        run: python platform/smoke_test.py
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 凭据扫描：使用仓库根 .gitleaks.toml 的 allowlist（projects/*/codex-home/）
+      - name: gitleaks detect
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

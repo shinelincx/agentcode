@@ -1,0 +1,36 @@
+# 节点规则（编排层判定口径）—— 改这里不需要改代码
+# 与 project.yaml 分工：project.yaml 管环境/凭据/门禁命令；本文件只管判定阈值。
+# 缺失的键自动回退 platform/rules.py 的 DEFAULTS。
+# 本文件从 river 复制（C1 第二项目接入），proj-b 与 river 共用判定口径。
+
+doc:                           # requirements / design / prototype 文档产物
+  min_len: 80                  # 少于该字符数判「产物过短」
+  max_len: 50000               # 超过该字符数判「日志噪声混入」
+
+prototype:                     # 原型节点产物校验
+  md_min: 80                   # PROTOTYPE.md 最小字符数
+  html_min: 200                # index.html 最小字符数
+  html_max: 300000             # index.html 上限（防日志/依赖注入）
+  ui_keywords:                 # 文件归属表缺失时的界面关键词兜底
+    - 界面
+    - 页面
+    - 首页
+    - 按钮
+    - 样式
+    - 布局
+    - 组件
+    - 交互
+    - 前端
+    - 弹窗
+    - 表单
+    - 导航
+
+implement:                     # 实现节点
+  gate_fix_attempts: 1         # 门禁失败后把输出丢回 Worker 修正的次数（0=不修正）
+
+review:                        # 自动审查节点
+  diff_max: 20000              # 交给 codex 的 diff 上限（超出截断，控制 prompt 成本）
+  rework_attempts: 1           # 审查失败后自动返工到 implement 的次数（超出才 gate_failed）
+
+memory:                        # 项目记忆注入
+  context_max: 1500            # AGENTS.md 注入 prompt 的最大字符数

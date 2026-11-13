@@ -1,0 +1,7 @@
+title = "AgentCode gitleaks config"
+
+[allowlist]
+description = "项目级 codex-home 凭据目录（auth.json/config.toml 由本地部署产生、不应随仓库分发）。CI 允许其不触发泄漏告警，同时 .gitignore 作为首层防线。"
+paths = [
+    '''projects/.*/codex-home/.*''',
+]

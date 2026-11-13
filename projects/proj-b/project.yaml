@@ -1,0 +1,62 @@
+# C1 第二项目配置 · proj-b = pdca-erp（A1 模板 + project.yaml 复制接入，2026-11-13）
+# 验收：proj-b 在独立代码仓库上完成一次双 lane 任务闭环 + 与 river 的账本/配置隔离。
+# 仓库：d:\project\pdca-erp（Vue3+Vite 前端 / Spring Maven 后端），真实双 lane。
+
+project: proj-b
+repo_path: d:\project\pdca-erp
+workspace: d:\project\AgentCode\projects\proj-b   # 账本 state.db 与任务产物所在
+
+executor:
+  primary: codex
+  fallback: claude
+  codex_path: codex         # PATH 解析
+  # 凭据基目录：仅作 Worker 凭据复制源（graph._worker_codex_home 每个 Worker 独立复制），
+  # 从不直接作为 CODEX_HOME 运行，故与 river 共享只读安全、不产生第二份密钥副本。
+  # 如需为 proj-b 使用独立 codex 账户：改为 <workspace>/codex-home 并放入自己的 auth.json。
+  codex_home: d:\project\AgentCode\projects\river\codex-home
+
+model:
+  default: gpt-6.1-terra
+  degraded: gpt-6.1-sol
+  strong_roles: [requirements, design, review]
+
+budget:
+  unit: calls
+  monthly_quota: 20000
+  max_usage_per_task: 200
+  max_inflight_tasks: 1
+  thresholds: {alert: 0.80, degraded: 0.90, paused: 1.00}
+
+gates:
+  G1_requirements: {approver: user, sla_hours: 4}
+  G2_design:       {approver: user, sla_hours: 4}
+  G3_staging:      {approver: user, sla_hours: 4}
+  L1_review_weekly: {approver: user, backlog_alert: 20}
+
+review:
+  codex: true
+
+retro:
+  generate: false
+
+tech_stack:                  # pdca-erp：frontend(Vue3+Vite) / backend(Spring Maven 多模块)
+  type: vite+maven
+  web: frontend
+  api: backend
+  gate_commands:
+    # 注意：mvn 不在本机 PATH，后端暂不入门禁；前端门禁零依赖可跑。
+    # 后端接入时补 Maven（含 DB/Redis 集成环境）并在此追加命令。
+    typecheck: npm --prefix frontend run type-check
+    unit: node --test frontend/scripts/*.test.mjs
+    build: npm --prefix frontend run build
+    verify_all: npm --prefix frontend run type-check && node --test frontend/scripts/*.test.mjs
+
+test:
+  gates: [typecheck, unit]
+
+deploy:                      # proj-b 起步阶段不触发真实 staging；接入时按 pdca-erp CI 补齐
+  staging:
+    required: false
+    commands: []
+    healthcheck: ""
+    timeout_seconds: 900

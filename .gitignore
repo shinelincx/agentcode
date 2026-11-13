@@ -1,0 +1,19 @@
+# Worker 隔离凭据与运行态（CODEX_HOME 副本，不得入库）
+projects/*/codex-home/
+platform/codex-home-iso/
+# Worker 运行日志
+projects/*/*/logs/
+# 任务工作区（每次任务的仓库副本与产物，体积大且可能含凭据）
+projects/*/*/
+# 运行态数据库
+projects/*/state.db*
+projects/*/graph.db*
+projects/state.db*
+# Python 缓存
+__pycache__/
+*.pyc
+# 本地验收/分享产物
+test-ac02/
+test-ac06/
+.screenshots/
+.trae-html-share-packages/

@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="多 Agent 软件交付体系 V2.1 待评审方案：执行恢复、预算预占、权限隔离、不可变发布及十二项故障验收场景。">
+<meta name="source-document" content="docs/agentwiki/wiki/方案演进.md">
+<title>多 Agent 软件交付体系技术方案 V2.1</title>
+<style>
+:root {
+  --bg: #0f1419;
+  --bg2: #1a2332;
+  --bg3: #243044;
+  --ink: #e8edf3;
+  --muted: #8b9bab;
+  --rule: #2d3d52;
+  --accent: #3b82f6;
+  --accent2: #10b981;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --purple: #a78bfa;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+html { scroll-behavior: smooth; }
+
+/* Hero */
+.hero {
+  position: relative;
+  padding: 5rem 2rem 4rem;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(59,130,246,0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(16,185,129,0.1) 0%, transparent 50%),
+    var(--bg);
+  border-bottom: 1px solid var(--rule);
+  overflow: hidden;
+}
+
+.hero::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(45,61,82,0.3) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45,61,82,0.3) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-content { max-width: 960px; margin: 0 auto; position: relative; z-index: 1; }
+
+.hero-badge {
+  display: inline-block;
+  padding: 0.35rem 0.85rem;
+  background: rgba(16,185,129,0.15);
+  border: 1px solid rgba(16,185,129,0.35);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--accent2);
+  margin-bottom: 1.5rem;
+  letter-spacing: 0.05em;
+}
+
+.hero h1 {
+  font-size: 2.75rem; font-weight: 800; line-height: 1.15;
+  letter-spacing: -0.02em; margin-bottom: 1.25rem;
+  background: linear-gradient(135deg, var(--ink) 0%, var(--muted) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle { font-size: 1.15rem; color: var(--muted); max-width: 720px; margin-bottom: 2rem; }
+
+.hero-meta { display: flex; gap: 2rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); }
+.hero-meta span { display: flex; align-items: center; gap: 0.5rem; }
+.hero-meta span::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+/* Layout */
+.layout {
+  display: grid;
+  grid-template-columns: 270px 1fr;
+  gap: 3rem;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 3rem 2rem;
+}
+
+.toc { position: sticky; top: 2rem; align-self: start; font-size: 0.85rem; max-height: calc(100vh - 4rem); overflow-y: auto; padding-right: 0.5rem; }
+.toc h3 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 1.25rem 0 0.75rem; font-weight: 600; }
+.toc h3:first-child { margin-top: 0; }
+.toc ul { list-style: none; }
+.toc ul ul { padding-left: 0.9rem; margin-top: 0.2rem; }
+.toc li { margin-bottom: 0.35rem; }
+.toc a {
+  color: var(--muted); text-decoration: none; transition: color 0.2s;
+  display: block; padding: 0.18rem 0; border-left: 2px solid transparent;
+  padding-left: 0.7rem; margin-left: -0.7rem;
+}
+.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+.toc .toc-new { color: var(--accent2); font-size: 0.68rem; margin-left: 0.3rem; vertical-align: middle; }
+
+.content { min-width: 0; }
+
+.section { margin-bottom: 4rem; padding-bottom: 3rem; border-bottom: 1px solid var(--rule); }
+.section:last-child { border-bottom: none; }
+
+.section-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+
+.section-num {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.85rem; color: var(--accent);
+  background: rgba(59,130,246,0.1);
+  padding: 0.25rem 0.6rem; border-radius: 4px;
+  border: 1px solid rgba(59,130,246,0.2);
+}
+
+.section-num.patched { color: var(--accent2); background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.25); }
+
+.section h2 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.01em; }
+
+.section h3 { font-size: 1.2rem; font-weight: 600; margin: 2rem 0 1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.section h3::before { content: ''; width: 3px; height: 1.2rem; background: var(--accent); border-radius: 2px; }
+
+.section h4 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.7rem; color: var(--ink); }
+
+.section p { margin-bottom: 1rem; color: var(--muted); }
+.section strong { color: var(--ink); font-weight: 600; }
+.section ul, .section ol { margin: 0 0 1rem 1.4rem; color: var(--muted); }
+.section li { margin-bottom: 0.4rem; }
+.section li strong { color: var(--ink); }
+
+mark.key { background: none; color: var(--accent); font-weight: 600; }
+
+/* Gap badge */
+.gap-badge {
+  font-size: 0.68rem; font-weight: 700; padding: 0.15rem 0.5rem;
+  border-radius: 4px; letter-spacing: 0.04em;
+  background: rgba(16,185,129,0.15); color: var(--accent2);
+  border: 1px solid rgba(16,185,129,0.3);
+}
+
+/* Cards */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.card { background: var(--bg2); border: 1px solid var(--rule); border-radius: 12px; padding: 1.2rem 1.4rem; transition: border-color 0.2s, transform 0.2s; }
+.card:hover { border-color: rgba(59,130,246,0.4); transform: translateY(-2px); }
+.card-icon { font-size: 1.6rem; margin-bottom: 0.6rem; }
+.card h4 { margin-bottom: 0.4rem; font-size: 0.98rem; }
+.card p { font-size: 0.87rem; margin: 0; line-height: 1.55; }
+
+/* Status */
+.status-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.status-card { background: var(--bg2); border: 1px solid var(--rule); border-radius: 10px; padding: 1.2rem; text-align: center; }
+.status-num { font-size: 2rem; font-weight: 800; margin-bottom: 0.2rem; color: var(--accent2); }
+.status-label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; overflow-y: auto; max-height: 600px; margin: 1.5rem 0; border-radius: 10px; border: 1px solid var(--rule); }
+table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+thead { position: sticky; top: 0; z-index: 1; }
+th { background: var(--bg3); color: var(--ink); font-weight: 600; text-align: left; padding: 0.8rem 1rem; border-bottom: 1px solid var(--rule); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+td { padding: 0.7rem 1rem; border-bottom: 1px solid var(--rule); color: var(--muted); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: rgba(59,130,246,0.04); }
+td strong { color: var(--ink); }
+td code { color: var(--accent2); }
+
+.tag { display: inline-block; padding: 0.14rem 0.55rem; border-radius: 999px; font-size: 0.71rem; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.tag-high { background: rgba(239,68,68,0.15); color: var(--danger); }
+.tag-mid { background: rgba(245,158,11,0.15); color: var(--warn); }
+.tag-low { background: rgba(16,185,129,0.15); color: var(--accent2); }
+.tag-info { background: rgba(59,130,246,0.15); color: var(--accent); }
+.tag-purple { background: rgba(167,139,250,0.15); color: var(--purple); }
+
+/* Callouts */
+.callout { border-radius: 10px; padding: 1.2rem 1.4rem; margin: 1.25rem 0; border-left: 4px solid; }
+.callout h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+.callout p { margin: 0 0 0.4rem; font-size: 0.9rem; line-height: 1.6; }
+.callout p:last-child { margin-bottom: 0; }
+.callout ul { margin: 0.4rem 0 0 1.2rem; font-size: 0.9rem; }
+.callout-strong { background: rgba(59,130,246,0.08); border-color: var(--accent); }
+.callout-strong h4 { color: var(--accent); }
+.callout-warn { background: rgba(245,158,11,0.08); border-color: var(--warn); }
+.callout-warn h4 { color: var(--warn); }
+.callout-danger { background: rgba(239,68,68,0.08); border-color: var(--danger); }
+.callout-danger h4 { color: var(--danger); }
+.callout-success { background: rgba(16,185,129,0.08); border-color: var(--accent2); }
+.callout-success h4 { color: var(--accent2); }
+
+/* Code */
+.code-block {
+  background: #0a0e14; border: 1px solid var(--rule); border-radius: 10px;
+  padding: 1.2rem 1.4rem; margin: 1.25rem 0;
+  font-family: Consolas, 'Fira Code', monospace;
+  font-size: 0.8rem; line-height: 1.65; overflow-x: auto;
+  color: #c8d6e5; white-space: pre;
+}
+.code-block .cm { color: #5c6f85; }
+.code-block .kw { color: #a78bfa; }
+.code-block .st { color: #7ee2b8; }
+.code-title {
+  font-size: 0.78rem; color: var(--accent); margin: 1.25rem 0 -0.8rem;
+  font-family: Consolas, monospace;
+}
+
+/* Flow */
+.flow-container { background: var(--bg2); border: 1px solid var(--rule); border-radius: 12px; padding: 1.75rem; margin: 1.5rem 0; overflow-x: auto; }
+.flow { display: flex; align-items: center; min-width: max-content; justify-content: center; gap: 0; }
+.flow-node { background: var(--bg3); border: 1px solid var(--rule); border-radius: 8px; padding: 0.8rem 1.15rem; min-width: 105px; text-align: center; font-size: 0.8rem; color: var(--ink); }
+.flow-node .fn-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.2rem; }
+.flow-node.accent { background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(59,130,246,0.08)); border-color: rgba(59,130,246,0.4); }
+.flow-node.success { background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(16,185,129,0.08)); border-color: rgba(16,185,129,0.4); }
+.flow-node.warn { background: linear-gradient(135deg, rgba(245,158,11,0.2), rgba(245,158,11,0.08)); border-color: rgba(245,158,11,0.4); }
+.flow-node.danger { background: linear-gradient(135deg, rgba(239,68,68,0.2), rgba(239,68,68,0.08)); border-color: rgba(239,68,68,0.4); }
+.flow-node.purple { background: linear-gradient(135deg, rgba(167,139,250,0.2), rgba(167,139,250,0.08)); border-color: rgba(167,139,250,0.4); }
+.flow-arrow { color: var(--muted); font-size: 1.4rem; padding: 0 0.3rem; }
+
+.flow-column { display: flex; flex-direction: column; gap: 0.6rem; min-width: max-content; margin: 0 auto; }
+.flow-branch { display: flex; align-items: center; gap: 0; }
+
+/* Timeline */
+.timeline { position: relative; padding-left: 2rem; margin: 1.5rem 0; }
+.timeline::before { content: ''; position: absolute; left: 0.5rem; top: 0; bottom: 0; width: 2px; background: var(--rule); }
+.timeline-item { position: relative; margin-bottom: 1.6rem; }
+.timeline-item::before {
+  content: ''; position: absolute; left: -1.85rem; top: 0.35rem;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--accent); border: 3px solid var(--bg); z-index: 1;
+}
+.timeline-item.t-warn::before { background: var(--warn); }
+.timeline-item.t-blue::before { background: var(--accent); }
+.timeline-item.t-green::before { background: var(--accent2); }
+.timeline-item.t-purple::before { background: var(--purple); }
+.timeline-time { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.2rem; }
+.timeline h4 { margin: 0 0 0.4rem; font-size: 0.98rem; }
+.timeline ul { padding-left: 1.2rem; font-size: 0.87rem; color: var(--muted); margin-bottom: 0; }
+
+/* Action list */
+.action-list { list-style: none; margin: 1rem 0; }
+.action-list li {
+  display: flex; align-items: flex-start; gap: 0.75rem;
+  padding: 0.8rem 1rem; background: var(--bg2);
+  border: 1px solid var(--rule); border-radius: 8px; margin-bottom: 0.6rem;
+}
+.action-text { font-size: 0.88rem; color: var(--muted); flex: 1; }
+.action-text strong { color: var(--ink); }
+
+/* Compare */
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+.compare-col { background: var(--bg2); border: 1px solid var(--rule); border-radius: 12px; padding: 1.4rem; }
+.compare-col h4 { margin-bottom: 0.9rem; font-size: 0.98rem; padding-bottom: 0.5rem; border-bottom: 2px solid; }
+.compare-col.good h4 { color: var(--accent2); border-color: var(--accent2); }
+.compare-col.bad h4 { color: var(--danger); border-color: var(--danger); }
+.compare-col ul { padding-left: 1.1rem; font-size: 0.87rem; color: var(--muted); margin-bottom: 0; }
+.compare-col li { margin-bottom: 0.45rem; }
+
+/* Checkbox */
+.check-item { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.55rem 0; border-bottom: 1px solid var(--rule); font-size: 0.9rem; color: var(--muted); }
+.check-item:last-child { border-bottom: none; }
+.check-box { color: var(--accent); font-family: monospace; flex-shrink: 0; }
+
+/* Footer */
+.footer { border-top: 1px solid var(--rule); padding: 2rem; text-align: center; color: var(--muted); font-size: 0.82rem; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; padding: 2rem 1.25rem; }
+  .toc { position: relative; top: 0; order: -1; max-height: none; }
+  .hero h1 { font-size: 2rem; }
+  .compare-grid { grid-template-columns: 1fr; }
+  .flow { flex-wrap: wrap; gap: 0.5rem; }
+  .flow-arrow { transform: rotate(90deg); }
+}
+@media (max-width: 600px) {
+  .hero { padding: 3rem 1.25rem 2rem; }
+  .hero h1 { font-size: 1.7rem; }
+  .status-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+a { color: #7ab5ff; text-underline-offset: 3px; }
+a:hover { color: #b6d7ff; }
+a:focus-visible, summary:focus-visible, .table-wrap:focus-visible { outline: 2px solid #69b6ff; outline-offset: 4px; }
+.skip-link { position: fixed; top: -80px; left: 1rem; background: #fff; color: #111; padding: .7rem; z-index: 10; }
+.skip-link:focus { top: 1rem; }
+.hero { padding: 4rem 2rem 3rem; }
+.hero-content { max-width: 1160px; }
+.hero-badge { color: #f3c465; background: #382d19; border-color: #66522c; }
+.hero h1 { max-width: 850px; line-height: 1.3; }
+.hero-subtitle { max-width: 860px; }
+.hero-meta { gap: .6rem 1.8rem; }
+.layout { grid-template-columns: 245px minmax(0,1fr); max-width: 1420px; gap: 3rem; }
+.toc { font-size: .84rem; }
+.toc summary { cursor: pointer; color: var(--ink); font-weight: 700; margin-bottom: 1rem; }
+.toc li { margin-bottom: .5rem; }
+.toc a { display: flex; gap: .65rem; line-height: 1.5; }
+.toc a span { color: #5f83ab; font-family: Consolas, monospace; flex-shrink: 0; }
+.document-status { margin-bottom: 2.5rem; }
+blockquote { padding: 1rem 1.2rem; border-left: 3px solid var(--warn); background: #29251d; border-radius: 0 8px 8px 0; color: #d4bd91; }
+blockquote p { margin: 0; }
+.section { scroll-margin-top: 24px; }
+.section p, .section li { color: #acb9c8; }
+.section h2 { font-size: 1.55rem; }
+.section h3 { font-size: 1.1rem; }
+.table-wrap { overflow-x: auto; max-height: none; margin: 1.2rem 0 1.7rem; border: 1px solid var(--rule); border-radius: 9px; }
+.table-wrap table { width: 100%; border-collapse: collapse; margin: 0; font-size: .88rem; }
+th { background: #202d40; color: #e8edf3; text-align: left; font-weight: 650; }
+th, td { padding: .8rem 1rem; vertical-align: top; border-bottom: 1px solid var(--rule); line-height: 1.7; }
+td { color: #acb9c8; }
+tr:last-child td { border-bottom: 0; }
+td:first-child { color: #d6e4f2; min-width: 110px; }
+pre { background: #0a0e14; border: 1px solid var(--rule); border-radius: 10px; padding: 1.1rem; overflow-x: auto; margin: 1.3rem 0; font: .83rem/1.85 Consolas,'Microsoft YaHei',monospace; color: #b9d5ee; }
+.reference { border-bottom: 1px dotted #5c7289; }
+.footer { line-height: 1.9; }
+@media(max-width:900px) { .layout { grid-template-columns: minmax(0,1fr); gap: 2rem; padding: 2rem 1.2rem; } .toc { position: relative; top: 0; max-height: none; padding: 1rem; background: var(--bg2); border-radius: 8px; } .toc ul { columns: 2; } .toc li { break-inside: avoid; } .hero { padding: 2.8rem 1.2rem 2rem; } }
+@media(max-width:600px) { .toc ul { columns: 1; max-height: 260px; overflow-y: auto; } .hero h1 { font-size: 1.8rem; } .hero-subtitle { font-size: 1rem; } .section h2 { font-size: 1.3rem; } th,td { padding: .65rem .8rem; } table { min-width: 620px; } .section { margin-bottom: 2.8rem; padding-bottom: 2rem; } }
+@media(prefers-reduced-motion:reduce) { html { scroll-behavior: auto; } }
+@media print { :root { --ink:#111; --muted:#333; --rule:#ccc; } body { background:#fff; color:#111; font-size:10pt; } .hero { background:none; padding:0 0 1rem; } .hero::before,.toc,.skip-link { display:none; } .hero h1 { -webkit-text-fill-color:#111; background:none; font-size:24pt; } .layout { display:block; padding:0; } .section { break-before:auto; } .section p,.section li,td { color:#222; } th { background:#eee; color:#111; } td:first-child { color:#111; } table { min-width:0; } .table-wrap,pre { overflow:visible; } pre { white-space:pre-wrap; background:#f5f5f5; color:#111; } h2,h3 { break-after:avoid; } tr { break-inside:avoid; } blockquote { background:#f5f5f5; color:#222; } a { color:#17579c; } }</style>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到正文</a>
+<header class="hero"><div class="hero-content">
+<span class="hero-badge">技术方案 V2.1 · 2026.11.11 · 待评审提案</span>
+<h1>多 Agent 软件交付体系<br>技术方案 V2.1</h1>
+<p class="hero-subtitle">保留三层架构，优先验证可靠交付。将执行恢复、预算准入、权限隔离和发布流程落实为明确协议，以实际验收证据推进多项目扩展。</p>
+<div class="hero-meta"><span>单项目 → 双项目 → 四项目</span><span>15 个方案章节</span><span>12 项待执行故障验收</span><span>Markdown 与 HTML 同源</span></div>
+</div></header>
+<div class="layout">
+<aside class="toc" aria-label="文档目录"><details open><summary>方案目录 · V2.1</summary><nav><ul><li><a href="#section-01"><span>01</span>修订背景与证据边界</a></li>
+<li><a href="#section-02"><span>02</span>目标、范围与交付定义</a></li>
+<li><a href="#section-03"><span>03</span>总体架构与技术取舍</a></li>
+<li><a href="#section-04"><span>04</span>任务协议、状态与数据责任</a></li>
+<li><a href="#section-05"><span>05</span>可靠执行、恢复与清理</a></li>
+<li><a href="#section-06"><span>06</span>角色、lane 和运行隔离</a></li>
+<li><a href="#section-07"><span>07</span>人工闸门和质量验收</a></li>
+<li><a href="#section-08"><span>08</span>预算准入、结算与暂停</a></li>
+<li><a href="#section-09"><span>09</span>契约、制品发布与运行恢复</a></li>
+<li><a href="#section-10"><span>10</span>经验闭环与规则治理</a></li>
+<li><a href="#section-11"><span>11</span>模板版本、复现与评测</a></li>
+<li><a href="#section-12"><span>12</span>指标、观测与容量</a></li>
+<li><a href="#section-13"><span>13</span>实施路线与退出标准</a></li>
+<li><a href="#section-14"><span>14</span>故障验收场景与证据</a></li>
+<li><a href="#section-15"><span>15</span>待确认事项与文档验收</a></li></ul></nav></details></aside>
+<main class="content" id="main"><div class="document-status">
+<blockquote>
+<p>版本：2.1.0｜日期：2026-11-11（Asia/Singapore）｜状态：待评审提案。本文定义拟议机制与验收条件，不宣称平台已实现或缺口已闭环。</p>
+</blockquote>
+</div>
+<section class="section" id="section-01"><div class="section-header"><span class="section-num">01</span><h2>修订背景与证据边界</h2></div>
+<h3>范围与授权</h3>
+<p>用户在当前对话中明确要求“按优化方案更新一版方案”。授权覆盖方案修订和阅读版生成；系统实现、基础设施变更、生产发布和正式技术决策批准仍需各自的授权或记录。修订前已在本页和日志记录背景、范围、约束、拟议调整与未知项。</p>
+<p>本页是中文综合方案的编辑源，HTML 是同一内容的阅读版。GitHub Issues 仍是需求、规格和任务状态的权威源；正式领域定义及架构决策遵循领域文档和 ADR。正式采纳时应在对应 Issue/ADR 中记录批准范围，本页维护链接摘要。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>分类</th>
+<th>本次确认内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>事实</td>
+<td>已全文阅读 V2.0 HTML，原文件与 raw 快照 SHA256 一致；官方资料支持中断重执行、SemVer 范围和文件通知语义等修正。</td>
+</tr>
+<tr>
+<td>用户意图</td>
+<td>按前轮优化建议更新方案，并按仓库要求沉淀中文 Markdown、索引和日志。</td>
+</tr>
+<tr>
+<td>提案</td>
+<td>本文的执行协议、预算、权限、发布、记忆、评测及实施安排，均待正式评审。</td>
+</tr>
+<tr>
+<td>假设</td>
+<td>四项目为目标，先验证单项目；单机试点优先，不预设已经具备 16 个有效并发槽。</td>
+</tr>
+<tr>
+<td>未知</td>
+<td>技术栈、目标 Worker 操作系统、认证模式、预算、审批人、依赖关系及恢复目标待确认。</td>
+</tr>
+</tbody>
+</table></div>
+<p>2026-11-11 使用 gh 查询 origin 全部状态 Issue，返回空列表；当前无可关联的 Issue 批准记录。原评审 HTML 仍仅完成结构级阅读，本轮全文摄取范围为 V2.0 和本次 V2.1。此前“仅结构级阅读”的记录保留在历史日志中。</p>
+<h3>与 V2.0 的替代关系</h3>
+<p>保留三层组织、产物交接、lane 隔离、契约先行及生产发布人工控制。历史 V2.0 文件和快照不覆盖；以下是建议的替代，不表示运行系统已迁移。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>V2.0 设计或结论</th>
+<th>V2.1 提案</th>
+<th>调整理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>七项缺口全部闭环</td>
+<td>分开标记已设计、已实现、已验证</td>
+<td>方案描述不能替代运行证据。</td>
+</tr>
+<tr>
+<td>checkpointer + 文件存在即可无损恢复</td>
+<td>执行账本、制品哈希、幂等键、租约与对账</td>
+<td>防重复副作用、旧产物误用和双 Worker。</td>
+</tr>
+<tr>
+<td>调用后记账并异步熔断</td>
+<td>请求前原子预占，完成后结算</td>
+<td>避免并发请求同时透支相同余额。</td>
+</tr>
+<tr>
+<td>inotify 写入前阻断</td>
+<td>权限硬限制，文件通知做审计</td>
+<td>文件通知不提供授权裁决。</td>
+</tr>
+<tr>
+<td>删除 tag、撤包完成回滚</td>
+<td>候选验证、不可变发布、分层恢复</td>
+<td>撤包不能恢复已部署服务与数据。</td>
+</tr>
+<tr>
+<td>Retro 自动改 AGENTS.md</td>
+<td>异步候选经验，经审核后采用</td>
+<td>不将未经验证日志提升为长期规则。</td>
+</tr>
+<tr>
+<td>七角色固定经过全部环节</td>
+<td>七种职责按任务类型启用</td>
+<td>降低无关步骤、上下文和等待成本。</td>
+</tr>
+<tr>
+<td>记忆数量、混合评分证明改善</td>
+<td>衡量有效交付、费用、人工投入和恢复</td>
+<td>用任务结果验证收益。</td>
+</tr>
+</tbody>
+</table></div>
+<p>出处：「项目资料」、「V2.1技术核验」。</p>
+</section>
+<section class="section" id="section-02"><div class="section-header"><span class="section-num">02</span><h2>目标、范围与交付定义</h2></div>
+<p>目标是在明确的预算、权限和验收约束下，将需求推进到可追溯的 staging 交付；失败后可以恢复或交还人工，并避免重复执行未经确认的外部操作。</p>
+<p>一次成功交付应具备需求与验收标准版本、实现 commit、独立检查结果、适用审批、部署制品摘要及冒烟证据。生成代码或创建 PR 不等于交付成功。人工审批允许存在；“无人工代写代码”作为单独的自动化维度统计。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>范围</th>
+<th>首版处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单项目闭环</td>
+<td>优先选择小型、可恢复、有稳定验收的真实任务。</td>
+</tr>
+<tr>
+<td>四项目并行</td>
+<td>双项目依赖与隔离验证后扩展；公共控制模块故障另行定义影响。</td>
+</tr>
+<tr>
+<td>生产发布</td>
+<td>Agent 无生产写凭据，由获授权人员触发受保护 CI。</td>
+</tr>
+<tr>
+<td>自动学习</td>
+<td>首版收集候选并人工确认，不以自动写入条数作为交付条件。</td>
+</tr>
+<tr>
+<td>多机队列与复杂看板</td>
+<td>吞吐、可靠性和排障需求明确后再引入。</td>
+</tr>
+</tbody>
+</table></div>
+<p>V2.0 中 60%/85% 跑通率、10 分钟回滚、月预算偏差 10% 等数值作为历史目标候选保留，不在缺少样本和演练时承诺。预算准入与审批有效性是必须成立的约束；性能、成功率和恢复时长由试点校准。</p>
+</section>
+<section class="section" id="section-03"><div class="section-header"><span class="section-num">03</span><h2>总体架构与技术取舍</h2></div>
+<h3>三层组织与最小链路</h3>
+<p>模板层保存角色指令、门禁配方和版本配置；项目层保存独立代码、工作区与状态；平台层负责调度、预算、副作用执行及观测。共享资产以不可变版本引用，通过升级 PR 接入。</p>
+<pre><code class="language-text">需求与验收 → 计划/风险分级 → 必要人审 → 按需执行 → 独立验证
+                                              ↓ 失败回修（有上限）
+具体制品审批 → staging 部署与冒烟 → 持久化任务终态
+                                      └→ 待处理事件 → 异步 Retro → 候选经验
+
+派发、调用、结果提交：检查任务版本、租约、权限、预算
+</code></pre>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>对外职责</th>
+<th>内部承担的复杂性</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Orchestrator</td>
+<td>提交、推进、暂停、取消、恢复任务</td>
+<td>生命周期、人审、业务账本与图状态协调。</td>
+</tr>
+<tr>
+<td>Worker 适配器</td>
+<td>接收任务包，返回结果和制品清单</td>
+<td>执行器协议、隔离、进程、取消与用量。</td>
+</tr>
+<tr>
+<td>预算模块</td>
+<td>预占、结算、对账</td>
+<td>全局/项目/任务账户和在途费用。</td>
+</tr>
+<tr>
+<td>副作用执行模块</td>
+<td>执行已授权的 PR、合并、部署等操作</td>
+<td>幂等、租约、外部结果核对及审计。</td>
+</tr>
+<tr>
+<td>验证与发布</td>
+<td>检查并发布具体制品</td>
+<td>可信 CI、证据、候选版本和兼容性。</td>
+</tr>
+</tbody>
+</table></div>
+<p>首版可在一个代码库中实现上述模块，不要求拆成独立微服务。只有实际存在不同执行器时才抽取必要差异，避免仅转发参数的多层接口。</p>
+<h3>选型与升级条件</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>领域</th>
+<th>首版提案</th>
+<th>验证与升级条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>编排</td>
+<td>保留 LangGraph，锁定实际依赖版本</td>
+<td>验证中断、重启、并发合并、异常路径；骨架不作为已运行实现。</td>
+</tr>
+<tr>
+<td>执行器</td>
+<td>先验证一种，Codex 为候选；Claude Code 后续评估</td>
+<td>实测认证、权限、调用统计、取消、恢复和工具协议后才启用替换。</td>
+</tr>
+<tr>
+<td>状态/队列</td>
+<td>单机 SQLite + 持久化任务记录，进程内信号仅唤醒</td>
+<td>WAL 不替代业务领取、租约、重试和备份；实测写争用及重启。</td>
+</tr>
+<tr>
+<td>数据库升级</td>
+<td>测量后评估 Postgres</td>
+<td>多机协调、可用性或写争用触发；准备迁移脚本、核对与切换演练，不承诺只换连接串。</td>
+</tr>
+<tr>
+<td>消息队列</td>
+<td>首版不要求 Redis Streams</td>
+<td>数据库队列不满足吞吐/隔离时引入；仍需处理重复投递。</td>
+</tr>
+<tr>
+<td>LLM 出口</td>
+<td>验证执行器支持的受控出口</td>
+<td>不预设 API Key、订阅登录和全部工具调用均可透传一个代理，不以“500 行”估算兼容成本。</td>
+</tr>
+<tr>
+<td>观测</td>
+<td>结构化事件、CI 链接和最小任务视图</td>
+<td>按出域要求选择托管/自托管 Trace，不将易接入等同免费。</td>
+</tr>
+</tbody>
+</table></div>
+<p>同机项目独立进程、工作目录和配额；共享预算模块、宿主机和网络仍属于公共故障域。隔离目标为“项目任务失败不修改其他项目状态；公共故障进入已定义暂停/恢复流程”。</p>
+</section>
+<section class="section" id="section-04"><div class="section-header"><span class="section-num">04</span><h2>任务协议、状态与数据责任</h2></div>
+<h3>Worker 输入与输出</h3>
+<p>输入包含 task_id、revision、node_id、attempt_id、lane_id、lease_epoch、到期时间、base_commit、允许改动范围、验收引用、上下文清单、有效权限、预算限额和配置摘要。输入文件以哈希绑定，不依赖隐含共享对话。</p>
+<p>输出包含成功/失败/阻塞/取消结果、错误分类、产物及哈希、实现 commit、检查记录和用量。Worker 自报成功须经编排器核验租约、版本和门禁才能接受。</p>
+<h3>状态权威与一致性</h3>
+<p>业务执行账本是任务生命周期与授权的权威，由 Orchestrator 受控转换；LangGraph checkpoint 保存内部图进度，不单独证明业务操作已完成。Dashboard 仅作查询视图。</p>
+<pre><code class="language-text">queued → running → awaiting_human → running → succeeded
+              ├→ paused_budget / paused_dependency → running
+              ├→ needs_reconciliation → running / needs_attention
+              ├→ needs_attention → running / failed
+              └→ cancelling → cancelled
+</code></pre>
+<p>succeeded、failed、cancelled 为任务终态。重开终态任务建立显式新修订或运行。恢复时先核对账本、有效租约、任务版本和外部结果，再恢复图；不假设 checkpoint 与业务账本具有跨系统原子事务。节点重放读取已完成操作记录，不重做相同副作用。</p>
+<h3>必要逻辑记录</h3>
+<p>下表定义数据责任，非已执行 DDL；实现时可按事务和查询需要合并存储。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>记录</th>
+<th>必要信息及约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tasks</td>
+<td>project/task、revision、status、state_version、deadline、风险级别；版本条件更新。</td>
+</tr>
+<tr>
+<td>node_runs</td>
+<td>task/revision/node、attempt、输入摘要、lease_epoch、状态、错误和时间；一个逻辑节点同一时刻只有一个有效租约。</td>
+</tr>
+<tr>
+<td>lanes</td>
+<td>branch、base_commit、目录、scope、环境命名空间、租约与保留原因；不得仅靠 active 判断清理。</td>
+</tr>
+<tr>
+<td>artifacts</td>
+<td>生产任务/attempt、commit、内容哈希、位置、验收状态与配置清单引用。</td>
+</tr>
+<tr>
+<td>operations</td>
+<td>唯一 operation_key、授权载荷哈希、外部 operation_id、intent/succeeded/unknown/failed。</td>
+</tr>
+<tr>
+<td>approvals</td>
+<td>任务修订、制品/发布清单哈希、审批人、决定、理由、有效期及权限依据。</td>
+</tr>
+<tr>
+<td>gate_results</td>
+<td>标准 ID、目标 commit/哈希、配方版本、结果及可信报告链接；保留历史。</td>
+</tr>
+<tr>
+<td>budget_accounts</td>
+<td>作用域、周期、币种、上限、已结算/预占金额、版本；同一事务核验所有适用账户。</td>
+</tr>
+<tr>
+<td>reservations/cost_ledger</td>
+<td>request_id、attempt、模型与计价版本、预占/实际费用、供应方请求标识、对账状态；回执幂等。</td>
+</tr>
+<tr>
+<td>outbox/memory_candidates</td>
+<td>唯一终态事件与消费状态；候选来源、适用范围、版本、审核和撤销记录。</td>
+</tr>
+</tbody>
+</table></div>
+<p>金额用统一精度的整数最小计价单位或固定精度十进制，不以浮点累加控制预算。全局预算由单一权威账本控制，不由四份项目库临时汇总后分别放行。日志脱敏、限制留存；大日志可存制品库，数据库保留引用和摘要。</p>
+<h3>修订和失效传播</h3>
+<p>需求、契约、实现 commit 或门禁配方变化时生成新的 revision/输入摘要，标记受影响下游结果和审批失效。审批不只绑定路径；新提交需重新评估必要门禁。任务与节点分别设重试次数、累计费用和墙钟时长上限。</p>
+</section>
+<section class="section" id="section-05"><div class="section-header"><span class="section-num">05</span><h2>可靠执行、恢复与清理</h2></div>
+<h3>幂等与结果不确定窗口</h3>
+<p>operation_key 标识一次逻辑操作，由任务修订、节点、操作类型及批准载荷摘要生成。同一操作重试沿用该键；每次变化的 attempt_id 不能作为唯一幂等依据。</p>
+<pre><code class="language-text">1. 核验租约、任务修订、审批哈希和预算许可。
+2. 原子写入操作意图；相同键已成功 → 返回既有结果。
+3. 调用支持幂等键的接口，关联外部 operation_id。
+4. 保存结果再推进节点；任务终态和 outbox 事件同事务提交。
+5. 崩溃/响应丢失 → 先查询外部结果，再补记或安全重试。
+6. 接口不支持幂等且结果不可查询 → needs_reconciliation，禁止盲重试。
+</code></pre>
+<p>这是至少一次调度下对特定副作用的去重和核对，不承诺任意系统的 exactly-once。PR、合并、部署和发布凭据由受控副作用模块持有，Worker 不得绕过授权检查直接执行。</p>
+<h3>Worker 失联和接管</h3>
+<p>心跳与业务进度分开观测。超时标记 suspect，暂停接受旧 epoch 结果；确认停止或隔离旧进程后重派，接管时原子递增 lease_epoch。结果提交和副作用端都校验 epoch。旧进程不能停止时，新 attempt 使用独立工作区，旧产物禁止合并；数据库、凭据等也需撤销或隔离，不能只在数据库中改租约字段。</p>
+<p>心跳和超时按工具最长调用、负载及网络实测配置，不将失联直接判为死亡，也不因连续两次失败就假定执行器不合适。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>错误</th>
+<th>恢复策略</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>临时网络错误且无不确定副作用</td>
+<td>有上限的指数退避与抖动，计入总费用。</td>
+</tr>
+<tr>
+<td>门禁失败</td>
+<td>附证据回修；达到修复次数/费用/时间上限后交人工。</td>
+</tr>
+<tr>
+<td>权限拒绝</td>
+<td>检查范围或配置，needs_attention；不自动扩权重试。</td>
+</tr>
+<tr>
+<td>预算不足</td>
+<td>paused_budget；恢复前重新校验版本、租约和准入。</td>
+</tr>
+<tr>
+<td>副作用结果未知</td>
+<td>needs_reconciliation，查询或人工核对。</td>
+</tr>
+<tr>
+<td>执行器故障</td>
+<td>回收旧实例、保全产物，验证备用能力与上下文迁移后重派。</td>
+</tr>
+</tbody>
+</table></div>
+<h3>LangGraph 落地约束</h3>
+<p>中断恢复会重执行所在节点，因此中断前副作用仍须幂等。多起点 add_edge 是等待全部起点完成，不是成功/失败任一入口。<a href="https://docs.langchain.com/oss/python/langgraph/interrupts">中断文档</a>、<a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/graph/state.py">StateGraph 源码</a></p>
+<p>显式定义错误分类、终态路径及稳定 thread_id；不使用未定义的错误节点，不以宽泛捕获吞掉人工中断。按锁定版本管理 checkpointer 生命周期。并行 artifacts 定义合并规则或拆为角色独立字段，测试冲突键与失败分支。<a href="https://docs.langchain.com/oss/python/langgraph/graph-api">Graph API</a></p>
+<p>本版用协议和验收场景替代未验证的框架代码；可运行样例须附依赖锁文件、启动方式及恢复测试。</p>
+<h3>清理和备份</h3>
+<p>清理同时核对终态、租约、未结操作、保留标记及归档。人审等待、预算暂停、失败保全和对账任务不算孤儿。删除前校验绝对路径在授权目录内，确认没有活跃进程和未保存产物。</p>
+<p>先归档提交/差异和必要日志，再通过 Git 工作区管理命令处理 worktree；隔离区设置保留期和恢复入口。数据库与制品联合备份并演练恢复，checkpoint 存在不能证明磁盘故障后的可恢复性。</p>
+</section>
+<section class="section" id="section-06"><div class="section-header"><span class="section-num">06</span><h2>角色、lane 和运行隔离</h2></div>
+<h3>职责按需启用</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>职责</th>
+<th>触发与产出</th>
+<th>权限原则</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>需求</td>
+<td>验收不完整或需求变化；明确标准和未知项</td>
+<td>读资料，写指定需求文档。</td>
+</tr>
+<tr>
+<td>架构</td>
+<td>跨模块、契约、迁移或高风险；计划、依赖、归属表</td>
+<td>可提契约变更 PR，不直接发布共享资产。</td>
+</tr>
+<tr>
+<td>原型/UI</td>
+<td>界面变化需验证；原型及设计说明</td>
+<td>读设计资产，写专属原型目录。</td>
+</tr>
+<tr>
+<td>前端/后端</td>
+<td>按依赖图实现</td>
+<td>仅写授权范围，使用隔离环境。</td>
+</tr>
+<tr>
+<td>测试/审查</td>
+<td>独立验证候选制品</td>
+<td>可写测试目录和临时数据，不能改受保护门禁或批准自己的实现。</td>
+</tr>
+<tr>
+<td>部署</td>
+<td>CI 构建/部署/冒烟，Agent 准备输入或诊断</td>
+<td>仅允许的 staging 操作，无生产写凭据。</td>
+</tr>
+<tr>
+<td>Retro 后台工作</td>
+<td>终态后提炼候选经验</td>
+<td>读脱敏证据，写候选区，不直接改人工规则。</td>
+</tr>
+</tbody>
+</table></div>
+<p>执行器差异是可评测手段，独立审查主要依靠隔离上下文、可信验收及权限。小型后端任务可以跳过 UI；低风险任务可依据已有批准策略简化审批。</p>
+<h3>lane 与资源范围</h3>
+<p>lane 是受租约管理的执行通道，包含分支、独立 worktree、Worker 和环境命名空间，可包含多次可追溯 attempt。并发前检查规范化路径与逻辑依赖；共享 migration、锁文件、路由和公共类型以显式串行任务处理。</p>
+<p>路径校验考虑大小写、父目录、重命名及符号链接。隔离范围还包括数据库/schema、账号/测试数据、端口、缓存、临时目录和 staging；共享资源声明独占或限额。合并由受控入口串行推进，后合并者对最新目标分支候选重新执行必要检查，结果绑定具体 commit。</p>
+<h3>硬限制与审计</h3>
+<p>由目标 OS 沙箱、容器挂载/ACL 等限制真实访问；分别控制 MCP 工具、shell、网络、凭据和 Git 元数据。只有 MCP Server 清单不能阻止命令行或直接网络绕过。</p>
+<p>inotify 负责监听审计，不承担写入前的授权裁决。<a href="https://man7.org/linux/man-pages/man7/inotify.7.html">inotify 文档</a> workspace-write 名称不证明任意 file_scope 已被硬执行；Codex writable_roots 为额外可写根目录，实际权限需按版本验证。<a href="https://learn.chatgpt.com/docs/config-file/config-reference">配置参考</a></p>
+<p>目标 Worker OS 在 P0 确定。仓库位于 Windows 不意味着 Linux inotify 配方可直接使用；验证在实际环境覆盖越界写、凭据读取、共享资产直推及网络出口。</p>
+</section>
+<section class="section" id="section-07"><div class="section-header"><span class="section-num">07</span><h2>人工闸门和质量验收</h2></div>
+<h3>审批绑定制品</h3>
+<p>按项目设置低/中/高风险规则，由受控策略分类。Agent 可提出风险升级，不能自行降低等级。生产、扩权、破坏性迁移及不兼容跨项目变更始终进入明确审批；其他操作可复用已有授权，不反复询问同一许可。</p>
+<p>审批记录责任人、备份责任人、时效、revision/commit/发布清单哈希、范围及到期时间。只有明确且有效的 approve 放行；缺失、异常或未授权响应维持等待。制品变更使对应审批失效；超时按工作时段和项目策略升级通知。</p>
+<h3>分层门禁</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>层次</th>
+<th>检验问题</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>需求</td>
+<td>输入、预期结果、范围和未知项明确吗？</td>
+<td>版本化标准及澄清记录。</td>
+</tr>
+<tr>
+<td>静态</td>
+<td>类型、依赖、敏感信息、改动范围合规吗？</td>
+<td>可信 CI 报告和配方版本。</td>
+</tr>
+<tr>
+<td>行为</td>
+<td>正常、异常、权限、回归路径符合要求吗？</td>
+<td>可执行测试及制品绑定结果。</td>
+</tr>
+<tr>
+<td>集成</td>
+<td>提供方与消费者组合兼容吗？</td>
+<td>对候选版本的消费者回归。</td>
+</tr>
+<tr>
+<td>交付</td>
+<td>部署与批准内容一致并可用吗？</td>
+<td>镜像摘要、部署记录、冒烟报告。</td>
+</tr>
+</tbody>
+</table></div>
+<p>章节齐全、无 TBD、测试引用全部需求编号只能检查形式完整性，不能证明正确。保留真实未知项及责任人，不为通过门禁而删除问题。LLM 提示歧义不能替代独立验收。</p>
+<p>前端优先复用设计系统，允许必要原生语义元素、布局和经说明的新组件；重复实现已有能力需说明，新组件走贡献流程。测试允许受控建数与清理，并按命名空间隔离。覆盖率区分行/分支、增量和项目风险，不能统一以 80% 判定质量。migration 验证升级、兼容和声明的恢复路径，不强制假定每次 down 都安全。</p>
+</section>
+<section class="section" id="section-08"><div class="section-header"><span class="section-num">08</span><h2>预算准入、结算与暂停</h2></div>
+<h3>预算不变量</h3>
+<pre><code class="language-text">对全局、项目、任务所有适用账户：
+已结算金额 + 在途预占金额 + 本次调用费用上界 ≤ 有效额度
+</code></pre>
+<p>单一权威账本事务检查并预占所有适用账户。币种和计价精度统一，周期时区固定配置（默认 Asia/Singapore）；日、月、任务额度分别控制，日重置不能绕过月上限。</p>
+<p>预占覆盖输入、最大输出、模型计价和可计费工具等；多轮 Agent 逐次准入，另设任务总费用/调用数。无法取得可信费用上界的模式需设置保守限额并说明保证范围，不宣称严格预算可控。供应方账单为最终对账依据，认证和收费模式在 P0 验证。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>准入</td>
+<td>从可信身份确定项目与角色，原子预占；不只依赖 Worker 自报标签。</td>
+</tr>
+<tr>
+<td>执行</td>
+<td>唯一 request_id，限制输出、超时、并发和计费工具；流式连接断开不等于调用停止。</td>
+</tr>
+<tr>
+<td>结算</td>
+<td>按实际用量和价格版本扣账并释放差额，重复回执幂等。</td>
+</tr>
+<tr>
+<td>不确定</td>
+<td>响应丢失/取消未确认时保留预占并对账，不按超时直接释放。</td>
+</tr>
+<tr>
+<td>核对</td>
+<td>查询供应方结果或人工处理，保留误差及调整依据。</td>
+</tr>
+</tbody>
+</table></div>
+<p>首版固定项目上限，受控调整；共享池借用仍受全局硬限额。跨周期在途请求按明确规则归属，不跨日自动清零。账本不可用时拒绝新付费调用；保留已执行状态及非 LLM 的停止、安全恢复能力。</p>
+<h3>状态与动作</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>状态</th>
+<th>初始建议触发线</th>
+<th>动作和恢复</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NORMAL</td>
+<td>结算 + 预占低于告警线</td>
+<td>按路由和配额运行。</td>
+</tr>
+<tr>
+<td>ALERT</td>
+<td>≥80%，试点校准</td>
+<td>告警、限制低优先级新任务；周期重置、额度追加或预占释放后按滞回规则恢复。</td>
+</tr>
+<tr>
+<td>DEGRADED</td>
+<td>≥90%，试点校准</td>
+<td>仅在能力兼容且通过评测时降级后续调用，暂停非必要 Retro。</td>
+</tr>
+<tr>
+<td>CIRCUIT_OPEN</td>
+<td>无法满足预占硬限额或策略主动关闭</td>
+<td>返回明确预算拒绝原因，paused_budget；额度恢复后重新准入，不作网络错误盲重试。</td>
+</tr>
+</tbody>
+</table></div>
+<p>累计支出本身不假定下降。项目额度不足只暂停该作用域，全局不足才全局限流。运行中请求只能在有效预占内继续，取消不承诺立即消除费用；任务在可验证检查点恢复，不承诺冻结任意执行器内存。</p>
+<p>切模型只能发生在已验证兼容的调用/任务边界，记录实际版本、能力和价格；网关不能仅替换字符串而忽略协议、工具或认证差异。</p>
+</section>
+<section class="section" id="section-09"><div class="section-header"><span class="section-num">09</span><h2>契约、制品发布与运行恢复</h2></div>
+<h3>不可变发布链路</h3>
+<pre><code class="language-text">契约/提供方 PR → 候选制品与摘要 → 提供方验证 + 登记消费者回归
+   → 发布同一已验证制品 → 消费方升级 PR → staging → 人工生产流程
+</code></pre>
+<p>按实际技术栈选择 schema、SDK 或包，不预设四项目均用 npm。依赖清单显式登记；“全部回归”只代表登记消费者范围，不能等同所有行为都有测试。</p>
+<p>已发布版本不覆盖、不复用版本号。坏版本停止推广并弃用，回到稳定指向或发布修复版；不将 npm unpublish 当日常回滚。撤包有平台条件，且不能撤销已安装依赖。<a href="https://docs.npmjs.com/unpublishing-packages-from-the-registry/">npm 撤包规则</a></p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>对象</th>
+<th>恢复方式</th>
+<th>前提</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>契约/依赖包</td>
+<td>回退锁文件与兼容版本，重建</td>
+<td>旧制品可取、构建可复现。</td>
+</tr>
+<tr>
+<td>运行服务</td>
+<td>回到已验证镜像摘要和配置</td>
+<td>数据/schema 兼容，流量与健康检查可恢复。</td>
+</tr>
+<tr>
+<td>数据库</td>
+<td>兼容扩展、迁移、切换、延后收缩；必要时前向修复或备份恢复</td>
+<td>评估停机、数据损失和恢复点，破坏性变更专项审批。</td>
+</tr>
+<tr>
+<td>设计系统</td>
+<td>回退兼容包或发布修复版</td>
+<td>组件、token 及消费方构建兼容。</td>
+</tr>
+</tbody>
+</table></div>
+<p>破坏性契约用新旧并行/适配期：先扩展提供方，再迁移消费者，确认旧依赖退出后收缩。模板、契约、项目按兼容矩阵和依赖图升级，不无条件要求“先模板后契约”。恢复目标经演练确定，不承诺所有场景 10 分钟恢复；安全恢复步骤不能依赖额度耗尽后再调用模型生成。</p>
+</section>
+<section class="section" id="section-10"><div class="section-header"><span class="section-num">10</span><h2>经验闭环与规则治理</h2></div>
+<p>任务终态与 outbox 事件同事务提交；后台消费者按事件键去重，收集失败、人审和修复证据。Retro 故障或预算不足只影响复盘进度，不改变交付终态。</p>
+<pre><code class="language-text">脱敏证据 → 候选经验 → 核实适用范围/冲突/复现 → 审核或评测 → 受控采用
+                         └→ 证据不足：继续候选或归档
+已采用经验 → 效果观察 → 修订 / 撤销 / 硬化为门禁
+</code></pre>
+<p>候选包含 source_task、失败与修复证据、适用项目/角色/版本、触发条件、具体动作、审核及撤销记录。重复出现两次只触发复核；同源错误被反复复制不算独立证据。</p>
+<p>AGENTS.md、正式规范与 ADR 由授权流程维护。Retro 不能直接改这些规则，也不将原始日志或候选经验自动注入 system prompt。审核经验以带出处的辅助上下文提供，不覆盖权限规则及当前任务指令。跨项目推广重新验证和审核；权限、生产、恢复或架构规范变更走对应批准流程。</p>
+<p>按任务相关性选取经验，记录注入条目版本与 token 量；限制配置化，不把行数当精确 token 数。低频高影响约束不能仅因十次任务没命中就淘汰。机器可判定的稳定规则优先进入门禁。撤销经验保留原因和影响任务列表；每月抽查不替代采用前审核。</p>
+</section>
+<section class="section" id="section-11"><div class="section-header"><span class="section-num">11</span><h2>模板版本、复现与评测</h2></div>
+<h3>每次运行冻结实际版本</h3>
+<p>项目可设置升级策略，但任务启动时保存确切模板版本/哈希、门禁版本、模型配置、执行器版本、契约、依赖锁文件、经验条目和 base_commit。挂起恢复检查兼容性，不在人审等待时自动替换环境。</p>
+<p>若采用 npm SemVer，^1.2 允许 minor 升级；~1.2.0 可表达 patch 范围，但仍需记录实际解析版本。<a href="https://github.com/npm/node-semver">npm SemVer</a></p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>变更</th>
+<th>策略</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>输出、交接契约或权限语义不兼容</td>
+<td>Major，提供迁移及兼容检查，项目显式批准。</td>
+</tr>
+<tr>
+<td>新能力/新门禁</td>
+<td>按实际兼容性判定；新增阻断规则可能破坏旧任务。</td>
+</tr>
+<tr>
+<td>措辞修正</td>
+<td>可记 Patch，但模型行为可能改变，仍需最低回归和分批推广。</td>
+</tr>
+</tbody>
+</table></div>
+<h3>评测和推广</h3>
+<p>2–3 个任务只做冒烟。固定评测集覆盖真实类型、难度、异常和历史回归；新旧版本使用相同输入与环境，重复运行并记录波动、样本量及失败原因。</p>
+<p>先满足权限、安全、兼容和验收底线，再比较包含返工的总费用、时延与人工投入。加权分数可辅助排序，不掩盖关键退化。经过候选评测、低风险试用、人工审查和分批升级，保留上一可用版本与回退路径。</p>
+</section>
+<section class="section" id="section-12"><div class="section-header"><span class="section-num">12</span><h2>指标、观测与容量</h2></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>定义与口径</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>有效交付率</td>
+<td>固定观察窗口中，在约定时间/预算内通过验收数 ÷ 纳入试点任务数；公开排除规则，取消/未完成单列，不只统计成功结束任务。</td>
+</tr>
+<tr>
+<td>单位有效交付成本</td>
+<td>同组全部执行费用（含失败、重试、评测摊销和复盘）÷ 验收通过数；同时报告总费用和成功数。</td>
+</tr>
+<tr>
+<td>人工投入</td>
+<td>每任务介入次数、主动处理分钟数，与人审等待分开。</td>
+</tr>
+<tr>
+<td>周期时长</td>
+<td>接收至交付 P50/P95，拆分排队、执行、人审和返工。</td>
+</tr>
+<tr>
+<td>同类错误发生率</td>
+<td>适用规则的任务中发生对应错误的比例，说明适用性判定及抽查。</td>
+</tr>
+<tr>
+<td>恢复质量</td>
+<td>分场景统计成功率、耗时、重复副作用、制品丢失和人工对账。</td>
+</tr>
+<tr>
+<td>预算质量</td>
+<td>准入拒绝、预占滞留、账单偏差、超限金额，按项目/模型/任务分组。</td>
+</tr>
+</tbody>
+</table></div>
+<p>弃用“重犯数 ÷ 全部失败数”作为学习改善主指标：新错误减少可能让它上升。没有对照时，不把未犯错归因于记忆；通过条目检索/采用记录、配对实验与人工抽查评估。条目数只描述库存。</p>
+<p>运行关联 project/task/revision/node/attempt/lane、trace_id、epoch、制品和操作标识。审批、预算、状态转换、部署与错误事件完整留存；高体积模型 Trace 可抽样，敏感数据脱敏并设保留期。</p>
+<p>首版视图只需当前状态、阻塞原因、待审批、预算和证据链接。依赖图、热力图、经验趋势由实际排障需求推动。容量由 CPU/内存、供应方限制、构建时间、连接、端口和预算共同决定；按项目设上限/保底、公平队列与背压，不把 16 槽当实测能力。</p>
+</section>
+<section class="section" id="section-13"><div class="section-header"><span class="section-num">13</span><h2>实施路线与退出标准</h2></div>
+<p>估算窗口为“3–4 个工作日准备 + 7 个实施周”，准备期不计入七周；实际排期取决于人员与环境。按退出条件推进，不因日历到期跳过验证。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>建议窗口</th>
+<th>建设重点</th>
+<th>退出条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0 可行性</td>
+<td>准备期</td>
+<td>确认栈/OS/认证；真实调用、权限、用量、预算最小验证；登记审批人</td>
+<td>调用可归因，越界被阻断，至少一种执行器可停止/恢复；未知项有责任人。</td>
+</tr>
+<tr>
+<td>P1 单项目可靠闭环</td>
+<td>Week 1–2</td>
+<td>账本、租约、审批哈希、门禁、staging，前置崩溃和预算演练</td>
+<td>代表性任务通过；恢复不重复操作；审批变更失效；额度不足停止新调用。</td>
+</tr>
+<tr>
+<td>P2 双项目验证</td>
+<td>Week 3–4</td>
+<td>契约候选、回归、环境隔离、升级 PR、最小任务视图</td>
+<td>单方失败不污染另一方；坏候选不推广；旧版本可重建；恢复证据齐全。</td>
+</tr>
+<tr>
+<td>P3 四项目扩展</td>
+<td>Week 5–6</td>
+<td>公平调度、配额、容量，必要时升级存储/队列</td>
+<td>并发满足预算和隔离；公共故障可暂停/恢复；发生数据迁移须验收。</td>
+</tr>
+<tr>
+<td>P4 效果评估</td>
+<td>Week 7 及以后</td>
+<td>固定评测集、模型/模板比较、经验审核及成本复盘</td>
+<td>相对基线报告结果与不确定性，不以七角色齐备或记忆条数强行通过。</td>
+</tr>
+</tbody>
+</table></div>
+<p>平台负责人负责协议及证据，项目负责人负责业务验收，安全/发布责任人负责权限及部署；具体人选 P0 填写。复杂看板、自动跨项目经验晋升、多机队列、第二执行器全面接入均可后置。</p>
+</section>
+<section class="section" id="section-14"><div class="section-header"><span class="section-num">14</span><h2>故障验收场景与证据</h2></div>
+<p>下列场景当前全部待执行。每次记录环境、版本、注入时点、预期/实际状态、日志、外部结果、费用和负责人；不能用文档检查替代运行演练。</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>场景</th>
+<th>通过条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AC-01</td>
+<td>部署成功后、记账前杀死 Orchestrator</td>
+<td>恢复查询同一结果，不重复部署；不可查询时对账，不盲重试。</td>
+</tr>
+<tr>
+<td>AC-02</td>
+<td>失联 Worker 仍运行，平台接管</td>
+<td>拒绝旧 epoch 提交/副作用；旧进程隔离，新 attempt 不共享可写资源。</td>
+</tr>
+<tr>
+<td>AC-03</td>
+<td>多请求竞争最后预算</td>
+<td>原子准入不超承诺上界，拒绝进入 paused_budget，无重试风暴。</td>
+</tr>
+<tr>
+<td>AC-04</td>
+<td>流式断连、取消回执丢失、跨日</td>
+<td>不提前释放可能已消费预占；对账后结算，不跨日重复发放原额度。</td>
+</tr>
+<tr>
+<td>AC-05</td>
+<td>审批后新增提交或修改部署配置</td>
+<td>旧审批不放行新制品，重跑受影响门禁及审批。</td>
+</tr>
+<tr>
+<td>AC-06</td>
+<td>shell、工具、符号链接尝试越界</td>
+<td>实际 OS 硬限制有效，凭据/网络/共享资产保护及审计有效。</td>
+</tr>
+<tr>
+<td>AC-07</td>
+<td>不兼容契约候选</td>
+<td>消费者回归失败阻止推广；旧依赖可安装重建，不依赖撤包。</td>
+</tr>
+<tr>
+<td>AC-08</td>
+<td>服务回退时数据已变化</td>
+<td>按声明兼容方案恢复或前向修复，阻止不安全降级并转人工。</td>
+</tr>
+<tr>
+<td>AC-09</td>
+<td>任务完成后 Retro 宕机并重复消费</td>
+<td>交付不回退，事件可重试，候选不重复，不自动改 AGENTS.md。</td>
+</tr>
+<tr>
+<td>AC-10</td>
+<td>两 lane 并发 E2E 后触发清理</td>
+<td>数据/端口/环境不污染，等待/暂停/对账 worktree 不误删。</td>
+</tr>
+<tr>
+<td>AC-11</td>
+<td>从备份恢复状态库/checkpoint</td>
+<td>与制品、外部结果对账，不重复副作用，记录恢复点和耗时。</td>
+</tr>
+<tr>
+<td>AC-12</td>
+<td>挂起期间升级模板/经验/执行器</td>
+<td>原配置可追溯，兼容恢复；必要时新修订重新验收。</td>
+</tr>
+</tbody>
+</table></div>
+<p>P1 至少通过 AC-01～06、09、12；P2 验证 AC-07、08、10、11 后再扩至四项目。每项包括失败处理路径，单次成功演示不证明长期故障率。</p>
+</section>
+<section class="section" id="section-15"><div class="section-header"><span class="section-num">15</span><h2>待确认事项与文档验收</h2></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="方案对照表，可横向滚动"><table>
+<thead>
+<tr>
+<th>待确认项</th>
+<th>影响与处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>四项目栈及依赖清单</td>
+<td>项目负责人提供，决定契约格式、门禁与共享资产。</td>
+</tr>
+<tr>
+<td>Worker OS、沙箱、认证</td>
+<td>真实环境验证权限、代理和恢复能力。</td>
+</tr>
+<tr>
+<td>计费、工具费用和预算</td>
+<td>明确费用上界、对账及保证范围，不假设全部订阅用量可精确折算美元。</td>
+</tr>
+<tr>
+<td>审批人、风险规则、工作时段</td>
+<td>明确自动放行、等待与通知范围。</td>
+</tr>
+<tr>
+<td>服务恢复目标与数据容忍度</td>
+<td>决定备份、恢复流程及迁移限制。</td>
+</tr>
+<tr>
+<td>出域与留存</td>
+<td>决定观测后端、脱敏和保留策略。</td>
+</tr>
+<tr>
+<td>正式采纳记录</td>
+<td>当前无关联批准；采纳时在 Issue/ADR 登记，本页保持 draft。</td>
+</tr>
+</tbody>
+</table></div>
+<h3>本次实际结果</h3>
+<p>已形成完整 V2.1 提案，保留历史替代理由，补齐任务协议、数据责任、预算权限、发布学习流程、分阶段退出标准与十二项验收场景。未实现平台、未执行 AC-01～12、未完成人工核验。</p>
+<p>HTML 已生成并完成桌面 1440×1100、手机 390×844 排版检查；15 个目录章节、17 张表、12 个验收编号均完整，目录跳转有效，页面无横向溢出或浏览器脚本错误。初次结构检查发现自动生成的三级标题锚点与章节锚点重名，已修复并复测通过。表格和代码块在窄屏内独立滚动。</p>
+<p>最终 UTF-8、内部链接和快照一致性结果记录于<span class="reference" title="仓库引用：../../../multi-agent-scheme-v2.1/validation.json">文档验证报告</span>。阅读版与哈希登记在 「项目资料」；外部技术核验见 「V2.1技术核验」。未验证打印成品、其他浏览器或任何运行验收场景。阅读版可由同目录 render.ps1 从本页重新生成；raw 快照只新增，不自动覆盖。</p>
+<h3>关联与来源</h3>
+<p>「项目概览」 · 「待核实问题」 · 「文档与决策规范」 · 「项目资料」 · 「V2.1技术核验」 · 「log」</p>
+<p><span class="reference" title="仓库引用：../../../multi-agent-scheme-v2/multi-agent-scheme-v2.html">V2.0 原文</span> · <span class="reference" title="仓库引用：../../../AGENTS.md">仓库规则</span> · <span class="reference" title="仓库引用：../../agents/issue-tracker.md">Issue 约定</span> · <span class="reference" title="仓库引用：../../agents/domain.md">领域文档约定</span></p>
+</section></main>
+</div>
+<footer class="footer">多 Agent 软件交付体系 · V2.1.0 · 2026-11-11（Asia/Singapore）<br>编辑源：docs/agentwiki/wiki/方案演进.md · 实现与运行验收待执行</footer>
+</body></html>

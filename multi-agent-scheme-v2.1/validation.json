@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-11",
+  "timezone": "Asia/Singapore",
+  "status": "passed",
+  "scope": "文档校验，不是平台运行验收",
+  "utf8": {
+    "strict": true,
+    "markdownFiles": 13,
+    "additionalTextFiles": 3
+  },
+  "links": {
+    "wikiLinks": 52,
+    "relativeFileLinks": 16,
+    "broken": [],
+    "externalEvidenceUrlsOpened": 7,
+    "excludedExamples": [
+      "欢迎.md 中 Obsidian 默认教学占位符“创建链接”，未修改用户笔记。"
+    ]
+  },
+  "html": {
+    "desktop": {
+      "sections": 15,
+      "tables": 17,
+      "uniqueAcceptanceIds": 12,
+      "duplicateIds": [],
+      "brokenAnchors": [],
+      "horizontalOverflow": false,
+      "verticallyClippedTables": 0,
+      "unresolvedWikiLinks": false,
+      "title": "多 Agent 软件交付体系技术方案 V2.1"
+    },
+    "mobile": {
+      "width": 390,
+      "documentWidth": 390,
+      "overflowContainers": 17
+    },
+    "browserErrors": [],
+    "screenshots": ".screenshots/multi-agent-scheme-v2.1-{desktop,mobile}.png"
+  },
+  "hashes": {
+    "sourceMarkdown": "f6147d250d67200e7bfbdaaebf225240973c60366f5538b5e07917d8b2eb2391",
+    "htmlAndSnapshot": "d1f9d4e0161d9817d6e21b365ed896dbfddd0e9397d9b05bdd80a07b2234dbb9",
+    "originalV2Unchanged": "e8b64075de4eaba7e6b27bfbab0821583d922fbefc237dbdfc8130df8524cbdf"
+  },
+  "resolvedFailures": [
+    "初次 HTML 检查发现自动标题 ID 重复，已修复生成器并复测通过。",
+    "长表格继承 600px 高度上限，已移除并验证所有表格无纵向裁切。",
+    "初次链接检查命中欢迎页教学占位符，确认不属于项目引用后明确排除。"
+  ],
+  "untested": [
+    "AC-01～AC-12 全部平台运行验收",
+    "原评审 HTML 全文摄取",
+    "打印成品及其他浏览器"
+  ],
+  "notes": [
+    "raw 新快照与阅读版字节一致，旧快照未覆盖。",
+    "外部依据由网页工具打开核验，未保存外部网页 raw 快照。"
+  ]
+}
