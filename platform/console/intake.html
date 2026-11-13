@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新建需求 · 交付平台</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">AC</span>
+    <div class="brand-text"><strong>新建交付需求</strong><span class="brand-sub">结构化录入 · 写入账本</span></div>
+  </div>
+  <div class="topbar-actions"><a class="btn" href="/">← 返回控制台</a></div>
+</header>
+
+<main class="form-page">
+  <div class="jobbar" id="notice" hidden></div>
+  <form class="card" id="f">
+    <label><b>标题 <span class="req">*</span></b>
+      <input id="title" maxlength="120" placeholder="例：stats 接口增加 startedAt 字段">
+    </label>
+    <label><b>目标 <span class="req">*</span></b>
+      <textarea id="goal" placeholder="用户可观察的行为变化，一两句话说清"></textarea>
+    </label>
+    <label><b>验收标准 <span class="req">*</span></b>
+      <textarea id="ac" placeholder="一行一条，例：&#10;GET /api/stats 返回 ISO 8601 的 startedAt&#10;前端展示服务启动时间"></textarea>
+    </label>
+    <label>非目标
+      <textarea id="non" placeholder="明确不做什么（可空）"></textarea>
+    </label>
+    <div class="row-2">
+      <label>后端范围（be 路径，逗号分隔）<input id="be" placeholder="apps/api/src/**"></label>
+      <label>前端范围（fe 路径，逗号分隔）<input id="fe" placeholder="apps/web/src/**"></label>
+    </div>
+    <label>优先级
+      <select id="prio">
+        <option value="normal">normal</option>
+        <option value="high">high</option>
+        <option value="low">low</option>
+      </select>
+    </label>
+    <label class="check-inline">
+      <input type="checkbox" id="autostart" checked>
+      <span>创建后立即启动（图跑到需求闸门 G1）</span>
+    </label>
+    <div class="hint">提交后任务写入账本并生成 requirement.json；启动由控制台执行器串行处理。</div>
+    <div class="savebar"><button class="btn btn-primary" id="submit" type="submit">创建任务</button></div>
+    <div id="result" class="hint" style="white-space:pre-wrap"></div>
+  </form>
+</main>
+
+<script src="/intake.js"></script>
+</body>
+</html>

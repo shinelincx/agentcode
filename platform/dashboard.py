@@ -28,7 +28,9 @@
     - 读路径零第三方依赖（stdlib http.server）；仅控制台执行时延迟导入 graph/langgraph。
     - 每请求新建只读连接，避免缓存掩盖 WAL 中的新写入。
     - 金额/配额从 project.yaml 读取（正则，不强依赖 PyYAML），读不到时用默认值。
-    - 接口为 JSON，前端 3s 轮询；字段名与账本表一致，P2 新增表可增量扩展。
+    - 前后端分离：前端为 platform/console/ 下的静态文件（HTML/CSS/JS），后端只提供
+      JSON API 与静态资源；运行模式由 GET /api/mode 下发，前端 3s 轮询 /api/overview。
+    - 接口字段名与账本表一致，P2 新增表可增量扩展。
 """
 from __future__ import annotations
 
@@ -50,10 +52,22 @@ import ledger
 from intake import IntakeError, create_task_from_payload
 
 PLATFORM = Path(__file__).resolve().parent
+CONSOLE_DIR = PLATFORM / "console"
 PROJECTS_DIR = PLATFORM.parent / "projects"
 DEFAULT_PROJECT = os.environ.get("AGENTCODE_PROJECT", "river")
 DEFAULT_DB = PROJECTS_DIR / DEFAULT_PROJECT / "state.db"
 DEFAULT_YAML = PROJECTS_DIR / DEFAULT_PROJECT / "project.yaml"
+
+# 静态前端（前后端分离）：只服务 console/ 目录下的文件
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+}
 
 # 挂起节点 → (审批闸门名, 产物 state keys)；与 run_task.GATES 保持一致
 GATE_KEYS = {
@@ -563,635 +577,6 @@ class ControlRunner:
         return " · ".join(parts)
 
 
-HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>交付平台管理控制台</title>
-<style>
-:root{--bg:#0f1115;--panel:#171a21;--line:#262b36;--txt:#e6e9ef;--dim:#8b93a3;
---ok:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"Segoe UI",system-ui,sans-serif}
-header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
-h1{font-size:16px;margin:0;font-weight:600}
-.tag{font-size:12px;color:var(--dim)}
-.state{margin-left:auto;display:flex;align-items:center;gap:10px}
-.badge{padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
-.NORMAL{background:rgba(63,185,80,.15);color:var(--ok)}
-.ALERT{background:rgba(210,153,34,.15);color:var(--warn)}
-.DEGRADED{background:rgba(210,105,34,.18);color:#e38d3a}
-.PAUSED{background:rgba(248,81,73,.16);color:var(--bad)}
-a{color:var(--info);text-decoration:none}
-.newreq{display:inline-block;padding:5px 12px;border:1px solid rgba(88,166,255,.55);border-radius:8px;font-size:13px}
-main{padding:18px 22px;display:grid;gap:18px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.kpi b{display:block;font-size:22px;font-weight:600;margin-top:4px}
-.kpi span{color:var(--dim);font-size:12px}
-.gauge{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
-.bar{height:10px;background:#0b0d11;border-radius:6px;overflow:hidden;margin-top:10px}
-.fill{height:100%;width:0;background:linear-gradient(90deg,var(--info),var(--ok));transition:width .4s}
-.fill.ALERT{background:linear-gradient(90deg,var(--info),var(--warn))}
-.fill.DEGRADED{background:linear-gradient(90deg,var(--warn),#e38d3a)}
-.fill.PAUSED{background:linear-gradient(90deg,#e38d3a,var(--bad))}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-section h2{font-size:13px;margin:0;padding:11px 14px;border-bottom:1px solid var(--line);color:var(--dim);font-weight:600}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
-th,td{text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
-th{color:var(--dim);font-weight:500;font-size:12px}
-tr:last-child td{border-bottom:none}
-td.req{max-width:340px;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
-.s-running{color:var(--info)}.s-done,.p-1{color:var(--ok)}.s-awaiting_human{color:var(--warn)}
-.s-failed,.s-gate_failed,.p-0{color:var(--bad)}.s-pending{color:var(--dim)}
-.mono{font-family:ui-monospace,Consolas,monospace}
-.empty{padding:14px;color:var(--dim);font-size:12px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-.flow{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
-.chip{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;border:1px solid var(--line);color:var(--dim)}
-.c-running{color:var(--info);border-color:rgba(88,166,255,.55)}
-.c-done{color:var(--ok);border-color:rgba(63,185,80,.45)}
-.c-failed{color:var(--bad);border-color:rgba(248,81,73,.55)}
-.c-awaiting_human{color:var(--warn);border-color:rgba(210,153,34,.6);background:rgba(210,153,34,.12)}
-.arrow{color:#3a4150;font-size:11px}
-button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:6px;
-padding:4px 9px;font-size:12px;cursor:pointer}
-button:hover{border-color:var(--info)}
-button.ok{color:var(--ok);border-color:rgba(63,185,80,.5)}
-button.bad{color:var(--bad);border-color:rgba(248,81,73,.5)}
-.acts{display:flex;gap:6px;align-items:center}
-.card-row{display:flex;align-items:center;gap:14px;padding:11px 14px;border-bottom:1px solid var(--line)}
-.card-row:last-child{border-bottom:none}
-.card-row .acts{margin-left:auto}
-.gate{color:var(--info);font-family:ui-monospace,Consolas,monospace;font-size:12px}
-.jobbar{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:#141821;font-size:12.5px}
-.jobbar.jrun{border-color:rgba(88,166,255,.5)}
-.jobbar.jok{border-color:rgba(63,185,80,.5)}
-.jobbar.jbad{border-color:rgba(248,81,73,.55);color:#ffb3ae}
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;z-index:10}
-.overlay[hidden]{display:none}
-.dialog{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(1000px,94vw);max-height:88vh;display:flex;flex-direction:column}
-.dialog-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line)}
-.dialog-head b{font-size:13px}
-.dialog-head button{margin-left:auto}
-#m-body{padding:14px;overflow:auto}
-#m-body h3{font-size:13px;color:var(--dim);margin:16px 0 8px}
-pre.doc{white-space:pre-wrap;word-break:break-word;background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12.5px;margin:8px 0 0}
-@media(max-width:900px){.grid2{grid-template-columns:1fr}}
-</style></head><body>
-<header>
-  <h1>交付平台 · <span id="proj">-</span></h1>
-  <span class="tag"><span id="mode">只读</span> · <span id="gen">-</span></span>
-  <span id="intake-slot"></span><a class="newreq" href="/config">配置</a>
-  <div class="state"><span class="tag" id="buf">缓冲 0</span><span id="state" class="badge">-</span></div>
-</header>
-<main>
-  <div id="jobbar" class="jobbar" hidden></div>
-  <div class="gauge">
-    <div style="display:flex;justify-content:space-between"><span class="tag">月度用量（call_count 主单位）</span>
-    <span class="mono" id="usage">-</span></div>
-    <div class="bar"><div class="fill" id="fill"></div></div>
-    <div class="tag" style="margin-top:8px" id="usagehint"></div>
-  </div>
-  <div class="kpis">
-    <div class="kpi"><span>任务总数</span><b id="k-tasks">-</b></div>
-    <div class="kpi"><span>运行中</span><b id="k-running">-</b></div>
-    <div class="kpi"><span>待人工</span><b id="k-awaiting">-</b></div>
-    <div class="kpi"><span>待审批</span><b id="k-approvals">-</b></div>
-    <div class="kpi"><span>Retro 待处理</span><b id="k-retro">-</b></div>
-    <div class="kpi"><span>累计 tokens</span><b id="k-tokens">-</b></div>
-  </div>
-  <section><h2>待审批 · 需求 G1 / 设计 G2 / staging G3</h2><div id="pending"></div></section>
-  <section><h2>任务与节点流程</h2><div id="tasks"></div></section>
-  <div class="grid2">
-    <section><h2>审批记录</h2><div id="approvals"></div></section>
-    <section><h2>门禁结果</h2><div id="gates"></div></section>
-  </div>
-  <section><h2>节点执行（最近 30 条）</h2><div id="runs"></div></section>
-  <section><h2>Lane 计划（合并顺序）</h2><div id="lanes"></div></section>
-  <div class="grid2">
-    <section><h2>Worker 租约</h2><div id="leases"></div></section>
-    <section><h2>Retro 投递（outbox）</h2><div id="outbox"></div></section>
-  </div>
-  <section><h2>按模型用量</h2><div id="models"></div></section>
-</main>
-<div id="modal" class="overlay" hidden>
-  <div class="dialog">
-    <div class="dialog-head"><b id="m-title">详情</b><button id="m-close">关闭</button></div>
-    <div id="m-body"></div>
-  </div>
-</div>
-<script>
-const CONTROL = false;
-const $ = id => document.getElementById(id);
-const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const table = (head, rows, render) => rows.length
-  ? `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(render).join('')}</tbody></table>`
-  : '<div class="empty">暂无数据</div>';
-const NODES = [['requirements','需求'],['review_g1','G1'],['design','设计'],['prototype','原型'],['review_g2','G2'],
-  ['implement','实现'],['test','测试'],['deploy','部署'],['review_g3','G3'],['retro','retro']];
-const GATE_OF = {review_g1:'G1_requirements',review_g2:'G2_design',review_g3:'G3_staging'};
-const KIND_OF = {G1_requirements:'requirements',G2_design:'design',G3_staging:'deploy'};
-let LAST = null;
-
-function flow(t, d){
-  const steps = (d.task_steps||{})[t.id] || {};
-  const gates = (d.gate_states||{})[t.id] || {};
-  return NODES.map(([key,label])=>{
-    let st = 'pending';
-    if (GATE_OF[key]) {
-      const dec = gates[GATE_OF[key]];
-      st = dec === 'approved' ? 'done' : dec === 'rejected' ? 'failed'
-         : dec === 'pending' ? 'awaiting_human' : 'pending';
-      if (st === 'pending' && t.current_node === key && t.status === 'awaiting_human') st = 'awaiting_human';
-    } else {
-      const s = steps[key];
-      if (s) st = s.status;
-      else if (t.current_node === key && t.status === 'running') st = 'running';
-    }
-    return `<span class="chip c-${esc(st)}" title="${esc(label)} · ${esc(st)}">${esc(label)}</span>`;
-  }).join('<span class="arrow">›</span>');
-}
-
-function pendingRows(d){
-  return d.pending_approvals || (d.approvals||[]).filter(a => a.decision === 'pending');
-}
-
-function renderPending(d){
-  const rows = pendingRows(d);
-  if (!rows.length) {
-    $('pending').innerHTML = '<div class="empty">没有待审批的闸门。用「＋ 新建需求」创建任务并启动。</div>';
-    return;
-  }
-  $('pending').innerHTML = rows.map(a => {
-    const kind = KIND_OF[a.gate_name] || '';
-    const art = ((d.gate_artifacts||{})[a.task_id]||{})[a.gate_name];
-    const acts = [];
-    if (kind) acts.push(`<button data-art="${esc(a.task_id)}" data-kind="${esc(kind)}">查看产物</button>`);
-    if (CONTROL) {
-      acts.push(`<button class="ok" data-decide="approved" data-task="${esc(a.task_id)}">批准</button>`);
-      acts.push(`<button class="bad" data-decide="rejected" data-task="${esc(a.task_id)}">驳回</button>`);
-    } else acts.push('<span class="tag">只读模式</span>');
-    return `<div class="card-row">
-      <div><b class="mono">${esc(a.task_id.slice(0,8))}</b> <span class="gate">${esc(a.gate_name)}</span>
-      <div class="tag">提交于 ${esc(a.created_at)} · 产物 ${art ? art.size + ' B' : '缺失'}</div></div>
-      <div class="acts">${acts.join('')}</div></div>`;
-  }).join('');
-}
-
-function renderTasks(d){
-  const waiting = new Set(pendingRows(d).map(a => a.task_id));
-  $('tasks').innerHTML = table(['任务','需求','优先级','状态','当前节点','流程','SLA','calls','操作'], d.tasks, t => {
-    const acts = [];
-    if (CONTROL) {
-      if (t.status === 'pending') acts.push(`<button data-start="${esc(t.id)}">启动</button>`);
-      if (waiting.has(t.id)) {
-        acts.push(`<button class="ok" data-decide="approved" data-task="${esc(t.id)}">批准</button>`);
-        acts.push(`<button class="bad" data-decide="rejected" data-task="${esc(t.id)}">驳回</button>`);
-      }
-    }
-    acts.push(`<button data-detail="${esc(t.id)}">详情</button>`);
-    return `<tr><td class="mono">${esc(t.id.slice(0,8))}</td>
-      <td class="req" title="${esc(t.requirement)}">${esc(t.requirement)}</td>
-      <td>${esc(t.priority)}</td><td class="s-${esc(t.status)}">${esc(t.status)}</td>
-      <td>${esc(t.current_node||'-')}</td><td><div class="flow">${flow(t,d)}</div></td>
-      <td class="${t.sla_overdue?'s-failed':''}">${t.sla_wait_hours!=null?t.sla_wait_hours+'h/'+t.sla_hours+'h':'-'}</td>
-      <td class="mono">${t.calls}</td><td><div class="acts">${acts.join('')}</div></td></tr>`;
-  });
-}
-
-async function tick(){
-  let d; try { d = await (await fetch('/api/overview',{cache:'no-store'})).json(); } catch(e){ return; }
-  if (d.error){ $('gen').textContent = d.error; return; }
-  LAST = d;
-  $('proj').textContent = d.config.project;
-  $('gen').textContent = d.generated_at;
-  $('buf').textContent = `缓冲 ${d.buffer_pending}`;
-  const st = $('state'); st.textContent = d.budget.state; st.className = 'badge ' + d.budget.state;
-  const pct = Math.min(100, d.budget.ratio * 100).toFixed(1);
-  const fill = $('fill'); fill.style.width = pct + '%'; fill.className = 'fill ' + d.budget.state;
-  $('usage').textContent = `${d.budget.calls.toLocaleString()} / ${d.budget.quota.toLocaleString()} (${pct}%)`;
-  $('usagehint').textContent =
-    `阈值 alert ${(d.config.alert*100)|0}% · degraded ${(d.config.degraded*100)|0}% · paused ${(d.config.paused*100)|0}% · 单任务上限 U=${d.config.per_task}`;
-  const set=(id,v)=>$(id).textContent=v;
-  set('k-tasks',d.counts.tasks); set('k-running',d.counts.running); set('k-awaiting',d.counts.awaiting);
-  set('k-approvals',d.counts.approvals); set('k-retro',d.counts.retro_pending);
-  set('k-tokens',d.budget.tokens.toLocaleString());
-  renderPending(d); renderTasks(d);
-  $('approvals').innerHTML = table(['任务','闸门','结论','决策人','时间'], d.approvals, a =>
-    `<tr><td class="mono">${esc(a.task_id.slice(0,8))}</td><td>${esc(a.gate_name)}</td>
-     <td class="s-${a.decision==='rejected'?'failed':(a.decision==='approved'?'done':'awaiting_human')}">${esc(a.decision)}</td>
-     <td>${esc(a.decided_by||'-')}</td><td class="tag">${esc(a.decided_at||a.created_at)}</td></tr>`);
-  $('runs').innerHTML = table(['任务','节点','lane','尝试','状态','分支','开始','结束'], d.node_runs, r =>
-    `<tr><td class="mono">${esc(r.task_id.slice(0,8))}</td><td>${esc(r.node_name)}</td><td>${esc(r.lane||'-')}</td>
-     <td>${r.attempt}</td><td class="s-${esc(r.status)}">${esc(r.status)}</td><td class="mono">${esc(r.branch||'-')}</td>
-     <td class="tag">${esc(r.started_at)}</td><td class="tag">${esc(r.ended_at||'-')}</td></tr>`);
-  $('lanes').innerHTML = table(['任务','lane','顺序','分支','基线','状态','并入时间'], d.lanes || [], l =>
-    `<tr><td class="mono">${esc(l.task_id.slice(0,8))}</td><td>${esc(l.name)}</td><td>${l.merge_order}</td>
-     <td class="mono">${esc(l.branch||'-')}</td><td class="mono">${esc(l.base_branch||'-')}</td>
-     <td class="s-${esc(l.status)}">${esc(l.status)}</td><td class="tag">${esc(l.merged_at||'-')}</td></tr>`);
-  $('leases').innerHTML = table(['任务','节点','Worker','角色','host','epoch','心跳','到期','状态'], d.leases || [], l =>
-    `<tr><td class="mono">${esc(l.task_id.slice(0,8))}</td><td>${esc(l.node_name)}</td>
-     <td class="mono">${esc((l.worker_id||'').slice(0,8))}</td><td>${esc(l.worker_role||'-')}</td>
-     <td>${esc(l.host||'-')}</td><td class="mono">${l.lease_epoch}</td>
-     <td class="tag">${esc(l.heartbeat_at||'-')}</td><td class="tag">${esc(l.lease_expires_at||'-')}</td>
-     <td class="${l.live ? 's-running' : 's-pending'}">${l.live ? '持有中' : '已释放/过期'}</td></tr>`);
-  $('outbox').innerHTML = table(['任务','队列#','状态','尝试','下次重试','最近错误','投递时间'], d.outbox || [], o =>
-    `<tr><td class="mono">${esc((o.task_id||'').slice(0,8))}</td><td class="mono">${o.id}</td>
-     <td class="${o.status==='dead' ? 's-failed' : (o.status==='done' ? 's-done' : 's-pending')}">${esc(o.status)}</td>
-     <td>${o.attempts}</td><td class="tag">${esc(o.next_attempt_at||'-')}</td>
-     <td class="tag" title="${esc(o.last_error||'')}">${esc((o.last_error||'-').slice(0,40))}</td>
-     <td class="tag">${esc(o.delivered_at||'-')}</td></tr>`);
-  $('gates').innerHTML = table(['任务','门禁','结果','时间'], d.gates, g =>
-    `<tr><td class="mono">${esc(g.task_id.slice(0,8))}</td><td>${esc(g.gate_name)}</td>
-     <td class="p-${g.passed}">${g.passed ? 'PASS' : 'FAIL'}</td><td class="tag">${esc(g.checked_at)}</td></tr>`);
-  $('models').innerHTML = table(['模型','执行器','calls','tokens'], d.usage_by_model, m =>
-    `<tr><td class="mono">${esc(m.model)}</td><td>${esc(m.executor)}</td><td>${m.calls}</td><td>${m.tokens.toLocaleString()}</td></tr>`);
-}
-
-function toast(msg){
-  const bar = $('jobbar'); bar.hidden = false; bar.className = 'jobbar jrun'; bar.textContent = msg;
-}
-
-async function act(url, payload){
-  try {
-    const res = await fetch(url, {method:'POST',
-      headers:{'Content-Type':'application/json','X-Control':'1'}, body: JSON.stringify(payload)});
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) return toast('操作失败：' + (d.error || res.status));
-    toast(`已提交 ${d.action} · ${d.task_id.slice(0,8)}（${d.job_id}），执行中…`);
-    pollJobs();
-  } catch (e) { toast('请求异常：' + e); }
-}
-
-async function showArtifact(taskId, kind){
-  try {
-    const res = await fetch(`/api/artifact?task_id=${encodeURIComponent(taskId)}&kind=${encodeURIComponent(kind)}`);
-    const d = await res.json();
-    if (!res.ok) return toast('读取失败：' + (d.error || res.status));
-    $('m-title').textContent = `${kind} · ${taskId.slice(0,8)}`;
-    if (kind === 'prototype_html') {
-      // 静态原型直接在沙箱 iframe 内渲染（无 allow-same-origin，脚本无法触达控制台）
-      $('m-body').innerHTML = `<div class="tag mono">${esc(d.path)} · ${d.size} B</div>
-        <iframe sandbox="allow-scripts" style="width:100%;height:70vh;border:1px solid #2a2f3a;border-radius:8px;background:#fff"
-          srcdoc="${esc(d.content)}"></iframe>`;
-    } else {
-      $('m-body').innerHTML = `<div class="tag mono">${esc(d.path)} · ${d.size} B</div>
-        <pre class="doc">${esc(d.content)}</pre>`;
-    }
-    $('modal').hidden = false;
-  } catch (e) { toast('请求异常：' + e); }
-}
-
-async function showDetail(taskId){
-  try {
-    const res = await fetch(`/api/task/detail?task_id=${encodeURIComponent(taskId)}`, {cache:'no-store'});
-    const d = await res.json();
-    if (!res.ok) return toast('读取失败：' + (d.error || res.status));
-    const arts = Object.entries(d.artifacts || {}).map(([k, v]) =>
-      `<tr><td>${esc(k)}</td><td class="mono">${esc(v.path || '-')}</td>
-       <td>${v.exists ? v.size + ' B' : '缺失'}</td>
-       <td>${v.exists ? `<button data-art="${esc(taskId)}" data-kind="${esc(k)}">查看</button>` : ''}</td></tr>`).join('');
-    const runs = (d.node_runs || []).map(r =>
-      `<tr><td>${esc(r.node_name)}</td><td>${r.attempt}</td><td class="s-${esc(r.status)}">${esc(r.status)}</td>
-       <td>${esc(r.lane||'-')}</td><td class="tag">${esc(r.started_at)}</td><td class="tag">${esc(r.ended_at||'-')}</td></tr>`).join('');
-    const apps = (d.approvals || []).map(a =>
-      `<tr><td>${esc(a.gate_name)}</td><td class="s-${a.decision==='rejected'?'failed':(a.decision==='approved'?'done':'awaiting_human')}">${esc(a.decision)}</td>
-       <td>${esc(a.decided_by||'-')}</td><td class="tag">${esc(a.decided_at||'-')}</td></tr>`).join('');
-    $('m-title').textContent = `任务 ${taskId.slice(0,8)}`;
-    $('m-body').innerHTML =
-      `<div class="tag">状态 ${esc(d.task.status)} · 当前节点 ${esc(d.task.current_node||'-')} · 重试 ${d.task.retry_count} · 创建 ${esc(d.task.created_at)}</div>
-       <div style="margin:10px 0"><button data-rerun="${esc(taskId)}">从节点重跑…</button>
-       <span class="tag">失败或已结束后可从指定节点复跑（不影响已提交分支）</span></div>
-       <h3>节点时间线</h3>${runs ? `<table><thead><tr><th>节点</th><th>尝试</th><th>状态</th><th>lane</th><th>开始</th><th>结束</th></tr></thead><tbody>${runs}</tbody></table>` : '<div class="empty">暂无节点记录</div>'}
-       <h3>产物</h3><table><thead><tr><th>类型</th><th>路径</th><th>大小</th><th></th></tr></thead><tbody>${arts}</tbody></table>
-       <h3>审批</h3>${apps ? `<table><thead><tr><th>闸门</th><th>结论</th><th>决策人</th><th>时间</th></tr></thead><tbody>${apps}</tbody></table>` : '<div class="empty">暂无审批记录</div>'}`;
-    $('modal').hidden = false;
-  } catch (e) { toast('请求异常：' + e); }
-}
-
-async function pollJobs(){
-  if (!CONTROL) return;
-  try {
-    const d = await (await fetch('/api/jobs',{cache:'no-store'})).json();
-    const j = (d.jobs || [])[0];
-    const bar = $('jobbar');
-    if (!j) { bar.hidden = true; return; }
-    bar.hidden = false;
-    bar.className = 'jobbar ' + (j.status === 'failed' ? 'jbad' : j.status === 'done' ? 'jok' : 'jrun');
-    bar.innerHTML = `<b>${esc(j.action)}</b> ${esc(j.task_id.slice(0,8))} · ${esc(j.status)} · ${esc(j.message||'')}
-      <span class="tag">${esc(j.queued_at)}</span>`;
-  } catch (e) {}
-}
-
-document.addEventListener('click', e => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  if (btn.id === 'm-close') { $('modal').hidden = true; return; }
-  if (btn.dataset.art) return showArtifact(btn.dataset.art, btn.dataset.kind);
-  if (btn.dataset.start) return act('/api/task/start', {task_id: btn.dataset.start});
-  if (btn.dataset.decide) return act('/api/task/decide',
-    {task_id: btn.dataset.task, decision: btn.dataset.decide, by: 'console'});
-  if (btn.dataset.detail) return showDetail(btn.dataset.detail);
-  if (btn.dataset.rerun) {
-    const from = prompt('从哪个节点重跑？可用：requirements / design / prototype / implement / review / test / deploy / retro', 'test');
-    if (!from) return;
-    return act('/api/task/rerun', {task_id: btn.dataset.rerun, from: from.trim(), by: 'console'});
-  }
-});
-
-tick(); setInterval(tick, 3000);
-if (CONTROL) { pollJobs(); setInterval(pollJobs, 2000); }
-</script></body></html>"""
-
-
-INTAKE_HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>新建需求 · 交付平台</title>
-<style>
-:root{--bg:#0f1115;--panel:#171a21;--line:#262b36;--txt:#e6e9ef;--dim:#8b93a3;
---ok:#3fb950;--bad:#f85149;--info:#58a6ff}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif}
-header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0;font-weight:600}
-a{color:var(--info);text-decoration:none}
-main{max-width:900px;padding:22px;display:grid;gap:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:14px}
-label{display:grid;gap:6px;font-size:13px;color:var(--dim)}
-label b{color:var(--txt);font-weight:600;font-size:13px}
-label .req{color:var(--bad)}
-input,textarea,select{width:100%;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
-color:var(--txt);padding:9px 11px;font:13px/1.5 inherit;outline:none}
-input:focus,textarea:focus,select:focus{border-color:var(--info)}
-textarea{min-height:88px;resize:vertical}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.hint{font-size:12px;color:var(--dim)}
-button{background:var(--info);color:#04101f;border:0;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
-button:disabled{opacity:.5;cursor:default}
-#result{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
-#result.ok{color:var(--ok)} #result.err{color:var(--bad)}
-@media(max-width:700px){.row{grid-template-columns:1fr}}
-</style></head><body>
-<header><h1>新建交付需求</h1>
-  <span style="margin-left:auto"><a href="/">← 返回控制台</a></span></header>
-<main>
-<form class="card" id="f">
-  <label><b>标题 <span class="req">*</span></b><input id="title" maxlength="120" placeholder="例：stats 接口增加 startedAt 字段"></label>
-  <label><b>目标 <span class="req">*</span></b><textarea id="goal" placeholder="用户可观察的行为变化，一两句话说清"></textarea></label>
-  <label><b>验收标准 <span class="req">*</span></b>
-    <textarea id="ac" placeholder="一行一条，例：&#10;GET /api/stats 返回 ISO 8601 的 startedAt&#10;前端展示服务启动时间"></textarea>
-  </label>
-  <label>非目标 <textarea id="non" placeholder="明确不做什么（可空）"></textarea></label>
-  <div class="row">
-    <label>后端范围（be 路径，逗号分隔）<input id="be" placeholder="apps/api/src/**"></label>
-    <label>前端范围（fe 路径，逗号分隔）<input id="fe" placeholder="apps/web/src/**"></label>
-  </div>
-  <label>优先级
-    <select id="prio"><option value="normal">normal</option><option value="high">high</option><option value="low">low</option></select>
-  </label>
-  <label style="display:flex;align-items:center;gap:8px">
-    <input type="checkbox" id="autostart" checked style="width:auto">
-    <span>创建后立即启动（图跑到需求闸门 G1）</span>
-  </label>
-  <div class="hint">提交后任务写入账本并生成 requirement.json；启动由控制台执行器串行处理。</div>
-  <div><button id="submit" type="submit">创建任务</button></div>
-  <div id="result"></div>
-</form>
-</main>
-<script>
-const $ = id => document.getElementById(id);
-const lines = s => s.split('\n').map(x => x.trim()).filter(Boolean);
-const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
-$('f').addEventListener('submit', async e => {
-  e.preventDefault();
-  const btn = $('submit'), out = $('result');
-  const payload = {
-    title: $('title').value.trim(), goal: $('goal').value.trim(),
-    acceptance_criteria: lines($('ac').value), non_goals: $('non').value.trim(),
-    scope: {be: csv($('be').value), fe: csv($('fe').value)}, priority: $('prio').value
-  };
-  btn.disabled = true; out.className = ''; out.textContent = '提交中…';
-  try {
-    const res = await fetch('/api/intake', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Intake': '1'},
-      body: JSON.stringify(payload)});
-    const data = await res.json();
-    if (!res.ok) { out.className = 'err'; out.textContent = '创建失败：' + (data.error || res.status); }
-    else {
-      let msg = '已创建 ' + data.task_id;
-      if ($('autostart').checked) {
-        const r2 = await fetch('/api/task/start', {method: 'POST',
-          headers: {'Content-Type': 'application/json', 'X-Control': '1'},
-          body: JSON.stringify({task_id: data.task_id})});
-        const d2 = await r2.json().catch(() => ({}));
-        msg += r2.ok ? '\n已提交启动（' + d2.job_id + '），回控制台查看进度：/' : '\n启动失败：' + (d2.error || r2.status);
-      } else {
-        msg += '\n未启动。可在控制台任务表点「启动」。';
-      }
-      out.className = 'ok'; out.textContent = msg;
-    }
-  } catch (err) { out.className = 'err'; out.textContent = '请求异常：' + err; }
-  btn.disabled = false;
-});
-</script></body></html>"""
-
-
-CONFIG_HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>角色配置 · 交付平台</title>
-<style>
-:root{--bg:#0f1115;--panel:#171a21;--line:#262b36;--txt:#e6e9ef;--dim:#8b93a3;
---ok:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif}
-header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0;font-weight:600}
-a{color:var(--info);text-decoration:none}
-main{padding:18px 22px;display:grid;gap:16px;max-width:1200px}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-section h2{font-size:13px;margin:0;padding:11px 14px;border-bottom:1px solid var(--line);color:var(--dim);font-weight:600}
-.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 16px;padding:14px}
-.field{display:grid;gap:5px;font-size:12.5px;color:var(--dim)}
-.field>span{font-weight:600;color:var(--txt)}
-input,select,textarea{width:100%;background:#0b0d11;border:1px solid var(--line);border-radius:7px;
-color:var(--txt);padding:7px 9px;font:12.5px/1.5 inherit;outline:none}
-input:focus,select:focus,textarea:focus{border-color:var(--info)}
-input[type=checkbox]{width:auto}
-input:disabled,select:disabled,textarea:disabled{opacity:.72;cursor:not-allowed}
-textarea{min-height:72px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
-.checks{display:flex;flex-wrap:wrap;gap:8px 14px}
-.chk{display:flex;align-items:center;gap:6px;color:var(--txt);font-size:12.5px}
-.full{grid-column:1/-1}
-.savebar{display:flex;align-items:center;gap:12px;padding:4px 0}
-button{background:var(--info);color:#04101f;border:0;border-radius:8px;padding:9px 18px;font-weight:700;cursor:pointer}
-button:disabled{opacity:.5;cursor:default}
-.hint{font-size:12px;color:var(--dim)}
-.jobbar{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:#141821;font-size:12.5px}
-.jobbar[hidden]{display:none}
-.jobbar.jok{border-color:rgba(63,185,80,.5)}
-.jobbar.jbad{border-color:rgba(248,81,73,.55);color:#ffb3ae}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
-th,td{text-align:left;padding:8px 14px;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:500;font-size:12px}
-tr:last-child td{border-bottom:none}
-.empty{padding:14px;color:var(--dim);font-size:12px}
-.mono{font-family:ui-monospace,Consolas,monospace}
-@media(max-width:700px){.fields{grid-template-columns:1fr}}
-</style></head><body>
-<header><h1>角色配置 · <span id="proj">-</span></h1>
-  <span class="hint mono" id="file">-</span>
-  <span style="margin-left:auto"><a href="/">← 返回控制台</a></span></header>
-<main>
-  <div id="msg" class="jobbar" hidden></div>
-  <div class="hint" id="modehint"></div>
-  <form id="cfg">
-    <section><h2>执行器 · executor</h2><div class="fields" id="f-executor"></div></section>
-    <section><h2>模型路由 · model</h2><div class="fields" id="f-model"></div></section>
-    <section><h2>预算边界 · budget</h2><div class="fields" id="f-budget"></div></section>
-    <section><h2>测试门禁 · test / tech_stack.gate_commands</h2><div class="fields" id="f-test"></div></section>
-    <section><h2>部署 staging · deploy.staging</h2><div class="fields" id="f-deploy"></div></section>
-    <section><h2>审批闸门 · gates</h2><div class="fields" id="f-gates"></div></section>
-    <section><h2>项目路径</h2><div class="fields" id="f-paths"></div></section>
-    <div class="savebar"><button type="submit" id="save">保存配置</button>
-      <span class="hint">保存后立即写入 project.yaml（定点替换、保留注释），并刷新运行时。</span></div>
-  </form>
-  <section><h2>最近配置变更 · config-audit.jsonl</h2><div id="audit"></div></section>
-</main>
-<script>
-const EDITABLE = false;
-const $ = id => document.getElementById(id);
-const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const get = p => p.split('.').reduce((o, k) => (o == null ? undefined : o[k]), CFG);
-let CFG = null, META = null;
-const dis = EDITABLE ? '' : 'disabled';
-
-function field(path, label, opts = {}){
-  const v = get(path);
-  const hint = opts.hint ? ` <span class="hint">${esc(opts.hint)}</span>` : '';
-  if (opts.options) {
-    return `<label class="field"><span>${esc(label)}${hint}</span>
-      <select data-path="${path}" ${dis}>${opts.options.map(o =>
-        `<option value="${esc(o)}" ${String(v) === String(o) ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
-  }
-  if (opts.type === 'lines') {
-    return `<label class="field full"><span>${esc(label)}${hint}</span>
-      <textarea data-path="${path}" data-type="list" rows="3" ${dis}>${esc((v || []).join('\n'))}</textarea></label>`;
-  }
-  if (opts.type === 'bool') {
-    return `<label class="field"><span>${esc(label)}</span>
-      <label class="chk"><input type="checkbox" data-path="${path}" data-type="bool" ${v ? 'checked' : ''} ${dis}> 启用</label></label>`;
-  }
-  const step = opts.step ? ` step="${opts.step}"` : '';
-  return `<label class="field"><span>${esc(label)}${hint}</span>
-    <input data-path="${path}" data-type="${opts.type || 'text'}" type="${opts.type === 'number' ? 'number' : 'text'}"${step}
-      value="${esc(v ?? '')}" ${dis}></label>`;
-}
-
-function checks(group, label, options){
-  const cur = get(group) || [];
-  return `<div class="field full"><span>${esc(label)}</span><div class="checks">${options.map(o =>
-    `<label class="chk"><input type="checkbox" data-group="${group}" value="${esc(o)}" ${cur.includes(o) ? 'checked' : ''} ${dis}> ${esc(o)}</label>`).join('')}</div></div>`;
-}
-
-function render(){
-  $('proj').textContent = CFG.project || '-';
-  $('file').textContent = META.file || '';
-  $('modehint').textContent = EDITABLE
-    ? '控制台模式：修改后点“保存配置”。校验失败不会写入文件。'
-    : '只读模式：配置可查看；写入需以 --control 启动控制台。';
-  $('f-executor').innerHTML =
-    field('executor.primary', '主执行器', {options: META.executors}) +
-    field('executor.fallback', '备用执行器', {options: META.executors}) +
-    field('executor.codex_home', 'Codex 凭据目录', {hint: '须含 auth.json'});
-  $('f-model').innerHTML =
-    field('model.default', '默认模型') +
-    field('model.degraded', '降级模型') +
-    checks('model.strong_roles', '永不降级的角色', META.roles);
-  $('f-budget').innerHTML =
-    field('budget.monthly_quota', '月度配额（calls）', {type: 'number'}) +
-    field('budget.max_usage_per_task', '单任务上限 U', {type: 'number'}) +
-    field('budget.max_inflight_tasks', '并发上限 N', {type: 'number'}) +
-    field('budget.thresholds.alert', 'alert 阈值', {type: 'number', step: '0.01'}) +
-    field('budget.thresholds.degraded', 'degraded 阈值', {type: 'number', step: '0.01'}) +
-    field('budget.thresholds.paused', 'paused 阈值', {type: 'number', step: '0.01'});
-  $('f-test').innerHTML =
-    checks('test.gates', '启用的测试门禁', META.gate_commands) +
-    META.gate_commands.map(name =>
-      field(`tech_stack.gate_commands.${name}`, `命令 · ${name}`)).join('');
-  $('f-deploy').innerHTML =
-    field('deploy.staging.required', 'required', {type: 'bool'}) +
-    field('deploy.staging.timeout_seconds', '超时（秒）', {type: 'number'}) +
-    field('deploy.staging.healthcheck', '健康检查（URL 或命令）') +
-    field('deploy.staging.commands', '部署命令（一行一条）',
-          {type: 'lines', hint: 'WSL 构建需在同一会话内完成'});
-  $('f-gates').innerHTML = META.gates.map(g =>
-    field(`gates.${g}.approver`, `${g} 审批人`) +
-    field(`gates.${g}.sla_hours`, `${g} SLA（小时）`, {type: 'number'})).join('');
-  $('f-paths').innerHTML =
-    field('repo_path', '业务仓库路径 repo_path') +
-    field('workspace', '平台工作区 workspace');
-  $('audit').innerHTML = (META.audit || []).length ? `<table><thead><tr><th>时间</th><th>操作人</th><th>变更</th></tr></thead><tbody>${
-    META.audit.map(e => `<tr><td class="mono">${esc(e.at)}</td><td>${esc(e.actor)}</td>
-      <td class="hint">${esc((e.changes || []).map(c => c.path).join(', '))}</td></tr>`).join('')}</tbody></table>`
-    : '<div class="empty">暂无配置变更记录</div>';
-  $('save').style.display = EDITABLE ? '' : 'none';
-}
-
-function collect(){
-  const updates = {};
-  const put = (p, v) => { if (JSON.stringify(get(p)) !== JSON.stringify(v)) updates[p] = v; };
-  document.querySelectorAll('[data-path]').forEach(el => {
-    const type = el.dataset.type || 'text';
-    let v;
-    if (type === 'bool') v = el.checked;
-    else if (type === 'number') {
-      if (el.value.trim() === '') return;
-      v = el.step && el.step.includes('.') ? parseFloat(el.value) : parseInt(el.value, 10);
-    } else if (type === 'list') v = el.value.split('\n').map(s => s.trim()).filter(Boolean);
-    else v = el.value.trim();
-    put(el.dataset.path, v);
-  });
-  const groups = {};
-  document.querySelectorAll('[data-group]').forEach(el => {
-    (groups[el.dataset.group] = groups[el.dataset.group] || []).push(el);
-  });
-  Object.entries(groups).forEach(([g, els]) => put(g, els.filter(e => e.checked).map(e => e.value)));
-  return updates;
-}
-
-async function load(){
-  const res = await fetch('/api/config', {cache: 'no-store'});
-  const d = await res.json().catch(() => ({}));
-  if (!res.ok) { $('modehint').textContent = '配置读取失败：' + (d.error || res.status); return; }
-  CFG = d.config; META = d.meta || {};
-  META.file = d.file || '';
-  META.audit = d.audit || [];
-  render();
-}
-
-$('cfg').addEventListener('submit', async e => {
-  e.preventDefault();
-  if (!EDITABLE) return;
-  const updates = collect();
-  const keys = Object.keys(updates);
-  const msg = $('msg'); msg.hidden = false;
-  if (!keys.length) { msg.className = 'jobbar'; msg.textContent = '没有检测到变更'; return; }
-  msg.className = 'jobbar'; msg.textContent = '保存中…';
-  try {
-    const res = await fetch('/api/config', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Control': '1'},
-      body: JSON.stringify({updates, by: 'console'})});
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) { msg.className = 'jobbar jbad'; msg.textContent = '保存失败：' + (d.error || res.status); return; }
-    msg.className = 'jobbar jok';
-    msg.textContent = `已保存 ${d.changed.length} 项：${d.changed.join(', ')}` +
-      (d.runtime_refreshed ? '（运行时已刷新）' : '（运行时刷新失败，需重启）');
-    await load();
-  } catch (err) { msg.className = 'jobbar jbad'; msg.textContent = '请求异常：' + err; }
-});
-
-load();
-</script></body></html>"""
-
 
 class Handler(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_DB
@@ -1217,25 +602,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
-        if path in ("/", "/index.html"):
-            html = HTML
-            if self.control_enabled:
-                html = html.replace('<span id="mode">只读</span>', '<span id="mode">控制台</span>')
-                html = html.replace('<span id="intake-slot"></span>',
-                                    '<a class="newreq" href="/intake">＋ 新建需求</a>')
-                html = html.replace("const CONTROL = false;", "const CONTROL = true;")
-            elif self.intake_enabled:
-                html = html.replace('<span id="mode">只读</span>', '<span id="mode">只读 + 录入</span>')
-                html = html.replace('<span id="intake-slot"></span>',
-                                    '<a class="newreq" href="/intake">＋ 新建需求</a>')
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
-        elif path == "/intake" and self.intake_enabled:
-            self._send(200, INTAKE_HTML.encode("utf-8"), "text/html; charset=utf-8")
-        elif path == "/config":
-            html = CONFIG_HTML
-            if self.control_enabled:
-                html = html.replace("const EDITABLE = false;", "const EDITABLE = true;")
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        if path == "/api/mode":
+            mode = ("控制台" if self.control_enabled
+                    else "只读 + 录入" if self.intake_enabled else "只读")
+            self._json(200, {"control": self.control_enabled,
+                             "intake": self.intake_enabled, "mode": mode})
         elif path == "/api/config":
             try:
                 import config_store
@@ -1281,8 +652,30 @@ class Handler(BaseHTTPRequestHandler):
                 return
             data = artifact_content(self.db_path, task_id, kind)
             self._json(404 if "error" in data else 200, data)
+        elif path == "/intake" and not self.intake_enabled:
+            self._json(404, {"error": "not found"})
+        elif path.startswith("/api/"):
+            self._json(404, {"error": "not found"})
         else:
-            self._send(404, b'{"error":"not found"}', "application/json")
+            self._serve_static(path)
+
+    def _serve_static(self, path: str):
+        """静态前端：仅服务 console/ 内的文件（拒绝目录穿越），按扩展名取 Content-Type。"""
+        rel = path.lstrip("/") or "index.html"
+        if rel in ("intake", "config"):
+            rel += ".html"
+        try:
+            root = CONSOLE_DIR.resolve()
+            target = (root / rel).resolve()
+            target.relative_to(root)
+        except (ValueError, OSError):
+            self._json(404, {"error": "not found"})
+            return
+        if not target.is_file():
+            self._json(404, {"error": "not found"})
+            return
+        ctype = CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        self._send(200, target.read_bytes(), ctype)
 
     def _write_allowed(self) -> bool:
         """跨站防护：自定义头（跨源需预检，本服务不应答）+ Origin 白名单。"""

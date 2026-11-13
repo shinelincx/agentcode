@@ -1251,6 +1251,13 @@ def console01(ws: Path):
         status, html = req("GET", "/")
         check("控制台页面含提需求入口与待审批区",
               status == 200 and "＋ 新建需求" in html and "待审批" in html)
+        status_mode, mode = req("GET", "/api/mode")
+        status_js, js = req("GET", "/app.js")
+        status_css, css = req("GET", "/styles.css")
+        check("前后端分离：静态前端资源与运行模式接口可用",
+              status_mode == 200 and mode.get("control") is True
+              and status_js == 200 and "fetch('/api/overview'" in js
+              and status_css == 200 and "--brand" in css)
         status, _ = req("POST", "/api/task/start", {"task_id": tid})
         check("缺少 X-Control 的写请求被拒（403）", status == 403)
         status, created2 = req("POST", "/api/intake", {
@@ -1488,8 +1495,10 @@ def config01(ws: Path):
               and config_store.load(path)["budget"]["monthly_quota"] == 26000
               and data["runtime_refreshed"] and g.QUOTA == 26000)
         status, page = req("GET", "/config")
+        status_js, page_js = req("GET", "/config.js")
         check("配置页面可访问且含保存入口",
-              status == 200 and "保存配置" in page and "budget.monthly_quota" in page)
+              status == 200 and "保存配置" in page
+              and status_js == 200 and "budget.monthly_quota" in page_js)
     finally:
         srv.shutdown()
         srv.server_close()

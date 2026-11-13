@@ -542,3 +542,13 @@
 - 未验证：未跑 river 全量测试（`npm run verify`，含 Playwright/testcontainers）；未做两次 `--no-cache` 的 bit-for-bit 比对；阈值门禁未启用（`exit-code=0`）；扫描 artifact 未上传。
 - 纠错：PowerShell 会剥掉单引号字符串内的双引号，`curl -d '{"nickname":…}'` 实际发出 `{nickname:…}` 得 400，属探针构造问题；改 `Invoke-WebRequest -UseBasicParsing` 后 200。
 - 文档：更新 [[wiki/C4-staging镜像治理]]（升级 pin 对照、复扫对比、残留与未知）、[[wiki/P2规划]] C4 行、[[index]] 条目。
+
+## [2026-11-13] feat+refactor | 管理控制台重设计（亮色 / 布局 / 前后端分离）
+- 触发：用户指示「重新设计管理控制台，包括界面布局优化、使用亮色模式，前后端分离」。
+- 改动：新增 `platform/console/`（`index.html`、`styles.css`、`app.js`、`intake.html/js`、`config.html/js`）；`platform/dashboard.py` 删除三段内联 HTML 常量（约 35KB），改为静态资源服务 + `GET /api/mode`（`{control, intake, mode}`）。静态路由用 `resolve` + `relative_to` 限定在 `console/` 内，按扩展名返回 Content-Type。
+- 设计：统一浅色 CSS 令牌；顶部固定栏（品牌/项目/模式/操作/预算态）；首屏「月度用量 + 6 KPI」两栏；待审批面板置顶带计数；表格固定表头 + 行悬浮；宽屏成对并排（审批/门禁、Lane/模型、租约/outbox）；1080/860/620px 三档折叠。
+- 行为保持：`/api/*` 契约不变；写请求仍要求 `X-Control: 1`（intake 兼容 `X-Intake: 1`）+ Origin 白名单；`OPTIONS` 405；请求体 ≤64KB；只读默认与控制台开关不变。
+- 验证：`ac_regression` 283 条 PASS=281 FAIL=0 SKIP=2（CONSOLE-01 新增静态资源/`/api/mode` 断言，CONFIG-01 改为校验 `/config.js`）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17。只读实例 8899 浏览器目视：亮色布局正常、无重叠、无未捕获 JS 错误。
+- 目视修复：`.btn` 的 `display:inline-flex` 覆盖 `hidden`，只读模式仍露出「＋ 新建需求」；加 `[hidden]{display:none!important}` 后复核通过。
+- 未验证：控制台模式（按钮/审批/弹窗）未做浏览器自动化交互回归；未引入前端构建链与单元测试。
+- 文档：更新 [[wiki/平台看板]]（实现/端点/界面重设计/验证证据/限制）；无新增页面，index 条目描述仍适用。

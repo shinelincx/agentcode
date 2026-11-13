@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交付平台管理控制台</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">AC</span>
+    <div class="brand-text">
+      <strong>交付平台</strong>
+      <span class="brand-sub">项目 <span id="proj">-</span></span>
+    </div>
+  </div>
+  <div class="topbar-meta">
+    <span class="chip" id="mode">只读</span>
+    <span class="meta-text" id="gen">-</span>
+    <span class="meta-text" id="buf">缓冲 0</span>
+  </div>
+  <div class="topbar-actions">
+    <a class="btn btn-primary" id="newreq" href="/intake" hidden>＋ 新建需求</a>
+    <a class="btn" href="/config">配置</a>
+    <span class="badge" id="state">-</span>
+  </div>
+</header>
+
+<main class="page">
+  <section class="hero">
+    <div class="panel">
+      <div class="panel-head"><h2>月度用量</h2><span class="meta-text">call_count 主单位</span></div>
+      <div class="gauge-body">
+        <div class="gauge-num"><b id="usage">-</b><span class="meta-text" id="usagepct">-</span></div>
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <p class="meta-text" id="usagehint"></p>
+      </div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><span>任务总数</span><b id="k-tasks">-</b></div>
+      <div class="kpi"><span>运行中</span><b id="k-running">-</b></div>
+      <div class="kpi"><span>待人工</span><b id="k-awaiting">-</b></div>
+      <div class="kpi"><span>待审批</span><b id="k-approvals">-</b></div>
+      <div class="kpi"><span>Retro 待处理</span><b id="k-retro">-</b></div>
+      <div class="kpi"><span>累计 tokens</span><b id="k-tokens">-</b></div>
+    </div>
+  </section>
+
+  <div id="jobbar" class="jobbar" hidden></div>
+
+  <section class="panel accent">
+    <div class="panel-head"><h2>待审批 · 需求 G1 / 设计 G2 / staging G3</h2><span class="count" id="pending-count">0</span></div>
+    <div id="pending"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>任务与节点流程</h2><span class="meta-text">最近 30 条 · 3s 自动刷新</span></div>
+    <div id="tasks" class="table-wrap"></div>
+  </section>
+
+  <div class="cols-2">
+    <section class="panel">
+      <div class="panel-head"><h2>审批记录</h2></div>
+      <div id="approvals" class="table-wrap"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>门禁结果</h2></div>
+      <div id="gates" class="table-wrap"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>节点执行</h2><span class="meta-text">最近 30 条</span></div>
+    <div id="runs" class="table-wrap"></div>
+  </section>
+
+  <div class="cols-2">
+    <section class="panel">
+      <div class="panel-head"><h2>Lane 计划（合并顺序）</h2></div>
+      <div id="lanes" class="table-wrap"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>按模型用量</h2></div>
+      <div id="models" class="table-wrap"></div>
+    </section>
+  </div>
+
+  <div class="cols-2">
+    <section class="panel">
+      <div class="panel-head"><h2>Worker 租约</h2></div>
+      <div id="leases" class="table-wrap"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Retro 投递（outbox）</h2></div>
+      <div id="outbox" class="table-wrap"></div>
+    </section>
+  </div>
+</main>
+
+<div id="modal" class="overlay" hidden>
+  <div class="dialog">
+    <div class="dialog-head"><b id="m-title">详情</b><button class="btn btn-sm" id="m-close">关闭</button></div>
+    <div id="m-body"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
