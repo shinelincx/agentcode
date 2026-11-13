@@ -47,10 +47,12 @@ def _kill_tree(pid: int) -> None:
 
 def run_codex(prompt: str, workdir: str, *, model: str = "gpt-6.1-terra",
               sandbox: str = "workspace-write", timeout: int = 1200,
-              codex_home: str | None = None, log_dir: str | None = None) -> WorkerResult:
+              codex_home: str | None = None, log_dir: str | None = None,
+              images: list[str] | None = None) -> WorkerResult:
     """同步执行 codex exec；捕获输出并解析 tokens。
 
     codex_home：隔离 home 目录（须含 auth.json）。不传则沿用当前用户 home。
+    images：参考图片绝对路径，按 `codex exec -i <file>` 附加到初始 prompt。
     注意（AC-06）：沙箱网络不阻断，隔离模式下 Worker 仅能读取专属 home 的凭据。
     C5：超时按进程树终止（taskkill /T 或 killpg），避免孤儿 codex 继续写仓库。
     """
@@ -68,8 +70,12 @@ def run_codex(prompt: str, workdir: str, *, model: str = "gpt-6.1-terra",
         env = {**os.environ, "CODEX_HOME": str(home)}
     # 根因修复（task-002 诊断）：多行 prompt 作为命令行参数会被截断（codex 只收到第一行，
     # 证据："the request ends before specifying the new behavior"）。改用 stdin 完整传递（`-` 占位）。
+    exec_args = ["exec"]
+    for img in images or []:
+        exec_args += ["-i", str(Path(img).resolve())]
+    exec_args += ["-s", sandbox, "-c", f'model="{model}"', "-C", str(workdir), "-"]
     proc = subprocess.Popen(
-        [*args, "exec", "-s", sandbox, "-c", f'model="{model}"', "-C", str(workdir), "-"],
+        [*args, *exec_args],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", env=env,
         start_new_session=(os.name != "nt"),

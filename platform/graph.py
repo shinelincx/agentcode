@@ -277,12 +277,14 @@ def _ac_coverage(design: str, requirements: str) -> tuple[bool, str]:
 def _run_doc_agent(state: DeliveryState, *, node_name: str, template: str,
                    params: dict, filename: str,
                    required_headings: tuple[str, ...],
-                   post_check=None, post_check_name: str = "") -> str:
+                   post_check=None, post_check_name: str = "",
+                   images: list[str] | None = None) -> str:
     """A2：Agent 生成文档（requirements/design 共用）。返回文档路径，失败返回空串。
 
     失败语义：预算拒发 → awaiting_human；执行异常/产物不合法 → gate_failed。
     两种情况都返回空串，由条件边终止图（不进入 G1/G2 人审）。
     B1：节点执行绑定 Worker 身份 + 租约 epoch，凭据目录按 Worker 隔离。
+    images：参考图片绝对路径，仅需求节点使用（codex -i 附加到初始 prompt）。
     post_check：契约级机械核对（doc -> (ok, reason)），在收尾前执行并入账。
     """
     import worker as w
@@ -318,7 +320,8 @@ def _run_doc_agent(state: DeliveryState, *, node_name: str, template: str,
     dirty_before = _repo_dirty(repo)
     try:
         r = w.run_codex(prompt, repo, model=model, codex_home=str(codex_home),
-                        log_dir=str(RIVER_WS / task_id / "logs"), sandbox="read-only")
+                        log_dir=str(RIVER_WS / task_id / "logs"), sandbox="read-only",
+                        images=images)
     except Exception as exc:  # 异常必须收尾，避免孤儿 running（P2-0 教训）
         ledger.record_gate_result(db, task_id, f"{node_name}_exec", False,
                                   str(exc)[:500], node_run_id=run)
@@ -358,7 +361,7 @@ def _run_doc_agent(state: DeliveryState, *, node_name: str, template: str,
 
 
 def requirements_node(state: DeliveryState) -> dict:
-    """需求节点（A2）：原始需求 → codex(requirements-gen) → REQUIREMENTS.md 落盘。"""
+    """需求节点（A2）：原始需求（文本 + 参考图片）→ codex(requirements-gen) → REQUIREMENTS.md。"""
     db = _ledger()
     raw = (state.get("requirement") or "").strip()
     if not raw:
@@ -367,9 +370,17 @@ def requirements_node(state: DeliveryState) -> dict:
                                   "state.requirement 为空，无法生成需求文档")
         ledger.set_task_status(db, state["task_id"], "gate_failed", node="requirements")
         return {"requirements_doc": ""}
+    attach_dir = RIVER_WS / state["task_id"] / "attachments"
+    images: list[str] = []
+    if attach_dir.is_dir():
+        images = sorted(str(p) for p in attach_dir.iterdir()
+                        if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg"))
+    attachments = "\n".join(f"- {p}" for p in images) or "无"
     doc = _run_doc_agent(state, node_name="requirements", template="requirements-gen",
-                         params={"raw_requirement": raw}, filename="REQUIREMENTS.md",
-                         required_headings=("## 需求", "## 验收标准", "## 非目标"))
+                         params={"raw_requirement": raw, "attachments": attachments},
+                         filename="REQUIREMENTS.md",
+                         required_headings=("## 需求", "## 验收标准", "## 非目标"),
+                         images=images)
     return {"requirements_doc": doc}
 
 

@@ -1300,6 +1300,34 @@ def console01(ws: Path):
         status, _ = req("POST", "/api/task/decide",
                         {"task_id": tid2, "decision": "maybe"}, {"X-Control": "1"})
         check("非法审批结论被拒（400）", status == 400)
+        # 文本 + 图片需求：建任务 → 附件落盘 → 详情/附件接口回读 → 非法图片拒绝
+        png_b64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+                   "hQGAhKmMIQAAAABJRU5ErkJggg==")
+        status, created3 = req("POST", "/api/intake", {
+            "title": "web-img", "goal": "screenshot driven", "acceptance_criteria": ["a1"],
+            "non_goals": "", "scope": {}, "priority": "normal",
+            "images": [{"name": "shot.png", "type": "image/png", "data": png_b64}],
+        }, {"X-Intake": "1"})
+        tid3 = created3.get("task_id", "") if isinstance(created3, dict) else ""
+        check("网页提需求可带参考图片（201）", status == 201 and bool(tid3))
+        status, detail3 = req("GET", f"/api/task/detail?task_id={tid3}")
+        check("任务详情返回原始需求字段与附件",
+              status == 200 and detail3.get("original", {}).get("title") == "web-img"
+              and (detail3.get("attachments") or [{}])[0].get("name") == "shot.png")
+        status, blob = req("GET", f"/api/attachment?task_id={tid3}&name=attachments/1-shot.png")
+        # req 对二进制按 utf-8 replace 解码（0x89 → U+FFFD），故只核对 PNG 文件头可读
+        check("参考图片可回读（PNG）", status == 200 and "PNG" in blob[:8])
+        status, _ = req("GET", f"/api/attachment?task_id={tid3}&name=../state.db")
+        check("附件路径越界被拒（404）", status == 404)
+        before = _count(db, "SELECT COUNT(*) FROM tasks")
+        status, err = req("POST", "/api/intake", {
+            "title": "bad-img", "goal": "x", "acceptance_criteria": ["a1"],
+            "non_goals": "", "scope": {}, "priority": "normal",
+            "images": [{"name": "x.gif", "type": "image/gif", "data": png_b64}],
+        }, {"X-Intake": "1"})
+        check("图片类型不支持时拒绝且不落库",
+              status == 400 and _count(db, "SELECT COUNT(*) FROM tasks") == before
+              and "不支持" in (err.get("error") or ""))
     finally:
         srv.shutdown()
         srv.server_close()

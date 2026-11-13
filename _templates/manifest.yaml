@@ -36,11 +36,12 @@ templates:
       workdir_hint: { required: false, desc: "Worker 工作目录说明（lane 根 cwd 与前缀去除规则）" }
 
   requirements-gen:
-    version: "1.1.0"
+    version: "1.2.0"
     file: "prompts/requirements-gen.tmpl"
     purpose: "A2 需求节点 Agent 产出 REQUIREMENTS.md"
     params:
       raw_requirement: { required: true, desc: "原始需求描述（一句话或一段）" }
+      attachments: { required: false, default: "无", desc: "参考图片绝对路径列表（codex -i 同步送入）" }
       task_id: { required: true, desc: "任务 id" }
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
 

@@ -103,6 +103,9 @@ function pendingCards(d) {
     const art = ((d.gate_artifacts || {})[a.task_id] || {})[a.gate_name];
     const acts = [];
     if (kind) acts.push(`<button class="btn btn-sm" data-art="${esc(a.task_id)}" data-kind="${esc(kind)}">查看产物</button>`);
+    if (a.gate_name === 'G1_requirements') {
+      acts.push(`<button class="btn btn-sm" data-compare="${esc(a.task_id)}">原始 vs 标准需求</button>`);
+    }
     if (state.mode.control) {
       acts.push(`<button class="btn btn-sm btn-ok" data-decide="approved" data-task="${esc(a.task_id)}">批准</button>`);
       acts.push(`<button class="btn btn-sm btn-bad" data-decide="rejected" data-task="${esc(a.task_id)}">驳回</button>`);
@@ -328,6 +331,9 @@ function actionsView(d) {
         <label>优先级<select id="at-prio">
           <option value="normal">normal</option><option value="high">high</option><option value="low">low</option>
         </select></label>
+        <label><b>参考图片</b> <span class="meta-text">PNG/JPEG，最多 4 张，单张 ≤2 MB</span>
+          <input id="at-images" type="file" accept="image/png,image/jpeg" multiple>
+          <div id="at-thumbs" class="thumbs"></div></label>
         <label class="check-inline"><input type="checkbox" id="at-autostart" checked>
           <span>创建后立即启动（图跑到需求闸门 G1）</span></label>
         <div class="savebar">
@@ -478,6 +484,59 @@ async function act(path, payload) {
 }
 
 /* ---------- 详情与产物 ---------- */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('读取图片失败：' + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+function originalHtml(o) {
+  const acs = (o.acceptance_criteria || []).map(x => `<li>${esc(x)}</li>`).join('');
+  const scope = Object.entries(o.scope || {}).map(([k, v]) =>
+    `<li>${esc(k)}: ${esc((v || []).join(', '))}</li>`).join('');
+  return `<dl class="kv">
+    <dt>标题</dt><dd>${esc(o.title)}</dd>
+    <dt>目标</dt><dd>${esc(o.goal)}</dd>
+    <dt>验收标准</dt><dd><ul>${acs}</ul></dd>
+    ${o.non_goals ? `<dt>非目标</dt><dd>${esc(o.non_goals)}</dd>` : ''}
+    ${scope ? `<dt>涉及范围</dt><dd><ul>${scope}</ul></dd>` : ''}
+    <dt>优先级</dt><dd>${esc(o.priority || '-')}</dd>
+  </dl>`;
+}
+
+function thumbsHtml(list) {
+  if (!list || !list.length) return '';
+  return `<div class="thumbs">${list.map(a =>
+    `<a href="${esc(a.url)}" target="_blank" rel="noopener" title="${esc(a.name)}">
+       <img src="${esc(a.url)}" alt="${esc(a.name)}">
+       <span class="meta-text">${esc(a.name)} · ${Math.round((a.size || 0) / 1024)} KB</span></a>`).join('')}</div>`;
+}
+
+async function showRequirementCompare(taskId) {
+  const [det, art] = await Promise.all([
+    getJSON(`/api/task/detail?task_id=${encodeURIComponent(taskId)}`),
+    getJSON(`/api/artifact?task_id=${encodeURIComponent(taskId)}&kind=requirements`),
+  ]);
+  if (!det.ok) { toast('读取失败：' + (det.data.error || ''), 'jbad'); return; }
+  const data = det.data, original = data.original || {};
+  const rawText = original.requirement || (data.task && data.task.requirement) || '（无原始需求）';
+  const std = art.ok ? art.data.content : '';
+  $('m-title').textContent = `原始需求 vs Agent 标准需求 · ${taskId.slice(0, 8)}`;
+  $('m-body').innerHTML = `<div class="compare">
+    <div class="cmp-col"><h3>原始需求（用户填写）</h3>
+      ${original.title ? originalHtml(original) : `<pre class="doc">${esc(rawText)}</pre>`}
+      ${thumbsHtml(data.attachments)}
+    </div>
+    <div class="cmp-col"><h3>Agent 标准需求（REQUIREMENTS.md）</h3>
+      ${std ? `<pre class="doc">${esc(std)}</pre>`
+             : '<div class="empty">尚未生成（任务还没跑到需求节点）</div>'}
+    </div></div>`;
+  $('modal').hidden = false;
+}
+
 async function showArtifact(taskId, kind) {
   const { ok, data } = await getJSON(
     `/api/artifact?task_id=${encodeURIComponent(taskId)}&kind=${encodeURIComponent(kind)}`);
@@ -515,6 +574,7 @@ async function showDetail(taskId) {
     `<div class="meta-text">状态 ${esc(stateText(data.task.status))} · 当前节点 ${esc(data.task.current_node || '-')}
        · 重试 ${data.task.retry_count} · 创建 ${esc(data.task.created_at)}</div>
      <div style="margin:12px 0"><button class="btn btn-sm" data-rerun="${esc(taskId)}">从节点重跑…</button>
+       <button class="btn btn-sm" data-compare="${esc(taskId)}">原始 vs 标准需求</button>
        <span class="meta-text">失败或已结束后可从指定节点复跑</span></div>
      <h3>节点时间线</h3>
      ${runs ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>尝试</th><th>状态</th><th>lane</th><th>开始</th><th>结束</th></tr></thead><tbody>${runs}</tbody></table></div>` : '<div class="empty">暂无节点记录</div>'}
@@ -561,6 +621,7 @@ document.addEventListener('click', e => {
   if (btn.id === 'm-close') { $('modal').hidden = true; return; }
   if (btn.id === 'refresh') { loadOverview(false); if (state.page === 'settings') SettingsView.load(state.project); return; }
   if (btn.dataset.art) return showArtifact(btn.dataset.art, btn.dataset.kind);
+  if (btn.dataset.compare) return showRequirementCompare(btn.dataset.compare);
   if (btn.dataset.start) return act('/api/task/start', { task_id: btn.dataset.start });
   if (btn.dataset.decide) return act('/api/task/decide',
     { task_id: btn.dataset.task, decision: btn.dataset.decide, by: 'console' });
@@ -575,6 +636,17 @@ document.addEventListener('click', e => {
 
 document.addEventListener('change', e => {
   if (e.target.id === 'project') switchProject(e.target.value);
+  if (e.target.id === 'at-images') {
+    const box = $('at-thumbs');
+    if (!box) return;
+    box.innerHTML = '';
+    Array.from(e.target.files || []).forEach(f => {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(f);
+      img.title = `${f.name} · ${Math.round(f.size / 1024)} KB`;
+      box.appendChild(img);
+    });
+  }
   if (e.target.id === 't-status') {
     state.taskFilter = e.target.value;
     if (state.data) $('t-body').innerHTML = tasksTable(state.data,
@@ -601,6 +673,21 @@ document.addEventListener('submit', async e => {
   btn.disabled = true;
   out.className = 'hint';
   out.textContent = '提交中…';
+  try {
+    const files = Array.from(($('at-images') && $('at-images').files) || []);
+    if (files.length > 4) throw new Error('最多 4 张图片');
+    payload.images = [];
+    for (const f of files) {
+      if (!['image/png', 'image/jpeg'].includes(f.type)) throw new Error(`不支持的图片类型：${f.name}`);
+      if (f.size > 2 * 1024 * 1024) throw new Error(`${f.name} 超过 2MB`);
+      payload.images.push({ name: f.name, type: f.type, data: await fileToBase64(f) });
+    }
+  } catch (err) {
+    btn.disabled = false;
+    out.className = 'hint s-failed';
+    out.textContent = '图片不合格：' + err.message;
+    return;
+  }
   const { ok, data } = await postJSON('/api/intake', payload, 'X-Intake');
   if (!ok) {
     out.className = 'hint s-failed';
@@ -620,6 +707,8 @@ document.addEventListener('submit', async e => {
     $('at-goal').value = '';
     $('at-ac').value = '';
     $('at-non').value = '';
+    if ($('at-images')) $('at-images').value = '';
+    if ($('at-thumbs')) $('at-thumbs').innerHTML = '';
     loadOverview(false);
   }
   btn.disabled = false;

@@ -66,8 +66,12 @@ CONTENT_TYPES = {
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
     ".ico": "image/x-icon",
 }
+# 需求参考图片：只允许 console 展示与读取这几种格式
+ATTACH_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 # 挂起节点 → (审批闸门名, 产物 state keys)；与 run_task.GATES 保持一致
 GATE_KEYS = {
@@ -379,8 +383,11 @@ def task_detail(db_path: Path, task_id: str) -> dict:
             }
     finally:
         db.close()
+    ws = db_path.parent
+    original = requirement_original(task_id, ws)
     return {"task": task, "node_runs": runs, "gates": gates,
-            "approvals": approvals, "artifacts": artifacts}
+            "approvals": approvals, "artifacts": artifacts,
+            "original": original, "attachments": task_attachments(task_id, ws, original)}
 
 
 def artifact_content(db_path: Path, task_id: str, kind: str) -> dict:
@@ -403,6 +410,53 @@ def artifact_content(db_path: Path, task_id: str, kind: str) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
     return {"kind": kind, "path": str(path), "size": len(text.encode("utf-8")),
             "content": text[:200_000]}
+
+
+def requirement_original(task_id: str, ws: Path) -> dict:
+    """原始需求（intake 结构化字段 + 附件元数据）；缺文件时返回空字典。"""
+    path = ws / task_id / "requirement.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def task_attachments(task_id: str, ws: Path, record: dict) -> list[dict]:
+    """附件清单：优先取 requirement.json，缺失时扫描 attachments/ 目录。"""
+    items = record.get("attachments") if isinstance(record.get("attachments"), list) else []
+    if items:
+        return [{"name": str(i.get("name") or ""), "rel": str(i.get("rel") or ""),
+                 "type": str(i.get("type") or ""), "size": int(i.get("size") or 0),
+                 "url": "/api/attachment?task_id=" + task_id + "&name="
+                        + str(i.get("rel") or "")} for i in items if isinstance(i, dict)]
+    base = ws / task_id / "attachments"
+    out = []
+    if base.is_dir():
+        for p in sorted(base.iterdir()):
+            if p.is_file() and p.suffix.lower() in ATTACH_TYPES:
+                out.append({"name": p.name, "rel": f"attachments/{p.name}",
+                            "type": ATTACH_TYPES[p.suffix.lower()], "size": p.stat().st_size,
+                            "url": f"/api/attachment?task_id={task_id}&name=attachments/{p.name}"})
+    return out
+
+
+def attachment_content(task_id: str, rel: str, ws: Path) -> dict:
+    """读取任务目录内的参考图片（限 png/jpeg，拒绝越界）。"""
+    if not task_id or not rel:
+        return {"error": "缺少 task_id 或 name"}
+    base = ws.resolve()
+    try:
+        path = (base / task_id / rel).resolve()
+        path.relative_to((base / task_id).resolve())
+    except (ValueError, OSError):
+        return {"error": "附件路径越界，拒绝读取"}
+    if not path.is_file() or path.suffix.lower() not in ATTACH_TYPES:
+        return {"error": "附件不存在"}
+    return {"path": str(path), "content": path.read_bytes(),
+            "type": ATTACH_TYPES[path.suffix.lower()]}
 
 
 def _recent_config_audit(path: Path, limit: int = 10) -> list[dict]:
@@ -650,6 +704,8 @@ class Handler(BaseHTTPRequestHandler):
     runners: dict[str, ControlRunner] = {}
     _runners_lock = threading.Lock()
     max_body: int = 64 * 1024
+    # 提需求允许带 4 张 ≤2MB 图片的 base64（约 10.7MB），其余写接口仍限 64KB
+    max_body_intake: int = 12 * 1024 * 1024
 
     def _project(self, query=None, payload=None) -> tuple[str, Path, Path] | None:
         """解析请求的目标项目；缺省用默认项目（保留 --db 覆盖与测试桩）。"""
@@ -767,6 +823,15 @@ class Handler(BaseHTTPRequestHandler):
             _, db_path, _ = target
             data = artifact_content(db_path, task_id, kind)
             self._json(404 if "error" in data else 200, data)
+        elif path == "/api/attachment":
+            task_id = (query.get("task_id") or [""])[0].strip()
+            name = (query.get("name") or [""])[0].strip()
+            _, db_path, _ = target
+            data = attachment_content(task_id, name, db_path.parent)
+            if "error" in data:
+                self._json(404, {"error": data["error"]})
+            else:
+                self._send(200, data["content"], data["type"])
         elif path == "/intake" and not self.intake_enabled:
             self._json(404, {"error": "not found"})
         elif path.startswith("/api/"):
@@ -803,13 +868,14 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return True
 
-    def _read_json(self) -> tuple[dict | None, int, str]:
+    def _read_json(self, limit: int | None = None) -> tuple[dict | None, int, str]:
+        limit = self.max_body if limit is None else limit
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             return None, 400, "Content-Length 非法"
-        if length <= 0 or length > self.max_body:
-            return None, 413, f"请求体须为 1~{self.max_body} 字节"
+        if length <= 0 or length > limit:
+            return None, 413, f"请求体须为 1~{limit} 字节"
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -873,7 +939,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._write_allowed():
                 self._json(403, {"error": "缺少写入头或 Origin 非本站"})
                 return
-            payload, code, error = self._read_json()
+            payload, code, error = self._read_json(limit=self.max_body_intake)
             if payload is None:
                 self._json(code, {"error": error})
                 return

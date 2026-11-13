@@ -330,6 +330,23 @@ input:disabled, select:disabled, textarea:disabled { background: var(--bg-soft);
 }
 .notice.ok { border-color: #bcd2ff; background: var(--brand-soft); color: var(--brand); }
 
+/* 需求对比评审：原始文本/字段 + Agent 标准需求 */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.cmp-col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.cmp-col h3 { margin: 0 0 10px; font-size: 13.5px; }
+.cmp-col .doc { margin: 0; max-height: 56vh; overflow: auto; }
+.kv { display: grid; grid-template-columns: 76px 1fr; gap: 6px 10px; margin: 0 0 10px; font-size: 13px; }
+.kv dt { color: var(--dim); }
+.kv dd { margin: 0; }
+.kv ul { margin: 0; padding-left: 18px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.thumbs a { display: flex; flex-direction: column; gap: 4px; text-decoration: none; color: var(--dim); }
+.thumbs img { height: 72px; max-width: 140px; object-fit: cover; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.thumbs .meta-text { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .compare { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 1100px) {
   .wide-left { grid-template-columns: 1fr !important; }
   .view > .cols-2, .view .cols-2 { grid-template-columns: 1fr; }

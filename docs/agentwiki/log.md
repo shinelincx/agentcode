@@ -561,3 +561,12 @@
 - 验证：`ac_regression` 286 条 PASS=284 FAIL=0 SKIP=2（新增项目列表、非法项目 404、关键字查询三条断言；CONSOLE-01/CONFIG-01 文案断言随迁）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17。`--control` 实例 8891 浏览器目视：六项导航与项目下拉正常，设置页表单与「保存配置」可见，切到 proj-b 后任务数 12→1、状态栏显示 proj-b/state.db、总览同步刷新，控制台无 JS 错误。
 - 未验证：「保存配置」提交、审批弹窗与产物 iframe 的浏览器自动化交互；两个项目并行跑图（当前串行）；与 CLI 混用的跨进程互斥。
 - 文档：更新 [[wiki/平台看板]]（信息架构、多项目路由与隔离、端点、验证证据、限制/同步演进修正）；[[index]] 条目描述更新。
+
+## [2026-11-13] feat | 图文需求 + 需求 Agent 标准化 + G1 原始/标准对比评审
+- 触发：用户指示「在新增需求改为 文本+图片 填写，然后在通过需求角色agent转化为标准规范的格式输出评审，评审时需要展示原需求以及agent生成的标准需求」。
+- 录入：`platform/intake.py` 新增 `images`（≤4 张、单张 ≤2MB、仅 PNG/JPEG，校验 base64 与文件头），落盘 `<ws>/<task_id>/attachments/`，`requirement.json` 记录附件元数据，归一化文本追加 `## 参考图片`；`/api/intake` 请求体上限单独放宽到 12MB，其余写接口仍 64KB。
+- 生成：需求节点扫描任务 `attachments/`，`worker.run_codex` 支持 `images` 并以 `codex exec -i` 送入模型；`requirements-gen` 模板升 1.2.0，新增 `$attachments` 与图文冲突处理约束；manifest 同步。
+- 评审：`/api/task/detail` 增 `original`/`attachments`；新增 `GET /api/attachment`（限任务目录内 PNG/JPEG）；前端「操作」页加参考图片多选与缩略图预览，G1 待审批卡片与任务详情新增「原始 vs 标准需求」按钮，双栏展示结构化原始需求+图片与 `REQUIREMENTS.md`。
+- 验证：`ac_regression` 291 条 PASS=289 FAIL=0 SKIP=2（新增带图 201、详情原始字段+附件、图片回读、越界 404、非法类型 400 不落库）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；`codex exec -i` 真模型冒烟返回码 0；8879 浏览器目视参考图片控件与对比模态，无 JS 错误。
+- 未验证：真实带图任务的完整 G1 生成质量；WebP/GIF 在录入层被拒。
+- 文档：更新 [[wiki/平台看板]]（图文需求与对比评审小节、端点、体积/字段约束、验证证据）；[[index]] 条目描述更新。

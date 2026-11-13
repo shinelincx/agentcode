@@ -10,6 +10,11 @@ Raw requirement:
 
 $raw_requirement
 
+Attached reference images (supplied to you as image inputs; inspect them for layout, fields,
+copy and error states):
+
+$attachments
+
 ## Task
 Write REQUIREMENTS.md with exactly this structure (keep the section headings verbatim):
 
@@ -30,6 +35,9 @@ Explicitly what is OUT OF SCOPE for this task. One short paragraph or bullets.
 - Cover only what the raw requirement asks for; do not widen the scope.
 - Every acceptance criterion must be objectively checkable by a gate or a reviewer.
 - Do not invent project facts that contradict the Context section.
+- Reference images are supporting evidence: when an image conflicts with the text, follow the text
+  and note the conflict under `## 需求`. Turn visual details into testable criteria where possible.
+- Do not describe the image files themselves (paths, sizes); describe the behavior they imply.
 
 ## Output contract
 - Output ONLY the Markdown content, starting with `# REQUIREMENTS · task $task_id`.
