@@ -515,3 +515,11 @@
 - 验证：`docker image inspect` ×3 命中；`compose config -q` OK；`build` 成功（基座 CACHED，web 镜像 `sha256:334522d0…`）；`up -d --wait` 三容器 healthy；`web=200`；`POST /api/guests` 200 且由 postgres 生成 player id。首次用不存在的 `/api/health` 探测得 404，属探针错误，已改为真实写接口。
 - 未完成：镜像扫描无工具（Windows/WSL 均无 trivy/grype/docker-scout，Docker Hub 不可达），「扫描无高危」未验证；未做两次 `--no-cache` 的 bit-for-bit 比对。
 - 文档：新增 [[wiki/C4-staging镜像治理]]；[[wiki/P2规划]] C4 标记部分完成；[[index]] 增加条目。river 仓库改动未提交。
+
+## [2026-11-13] verify+fix | C3 CI 远端首跑
+- 推送：仓库首次推送到 shinelincx/agentcode（公开，默认分支 main），入库 80 文件 / 1.13 MB；推送前收紧 .gitignore（projects/*/*/、codex-home、*.db、__pycache__）。本机 github.com:443 被阻断，改用 ssh://git@ssh.github.com:443；origin 仍为 HTTPS。
+- 首跑（43374644039）失败：checks 的 AC regression 12 个用例 IndexError: 2（`_repo_path` 用 `RIVER_WS.parents[2]`，/tmp 下只有 2 层父目录）；MULTI-01 双 lane gate_failed（回退路径 /river 落在不可写根目录）+ pdca-erp 断言按反斜杠取名在 PosixPath 上失败；gitleaks-action 生成 `bb2a711^..496949a` 增量 log-opts 报 ambiguous argument。
+- 修复：graph._repo_path 改按 PROJECTS_DIR / 工作区推导（不再越界、不写根目录）；MULTI-01 断言分隔符归一化；gitleaks job 改固定版本 v8.24.3 二进制全历史扫描。
+- 验证：本地浅路径复跑（TEMP=C:\acsim）ac_regression 282 条 PASS=280 FAIL=0 SKIP=2；prompt_eval 17/17、graph_smoke 12/12、smoke_test 20/20；本地 gitleaks git 全历史 no leaks。第 2 次远端运行 43375084226（c3f7947）checks + gitleaks 双 success。
+- 未验证/未完成：KILL-01 在 Linux 跳过，POSIX killpg 无 CI 覆盖；未核查 GitHub Secret Scanning / 推送保护；origin HTTPS 直连仍需网络放行。
+- 文档：新增 [[wiki/C3-CI首跑]]；[[wiki/P2规划]] C3 标完成；[[wiki/节点规则]] 凭据扫描 CI 行与 CI 接入节更新；[[index]] 增加条目。

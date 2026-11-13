@@ -15,6 +15,7 @@ Obsidian 浏览，Agent 维护，Git 保存版本。当前 Vault 已连接到本
 - [[wiki/权限矩阵配置清单]]：V2.2 §6.4 权限矩阵到实际配置的逐格映射（C2 审计）、三条红线核对与 6 项缺口。
 - [[wiki/C5-supervisor验证]]：supervisor 自愈边界实测（C5）——软停不自愈、孤儿进程风险与树杀修复。
 - [[wiki/C4-staging镜像治理]]：staging 基座镜像 digest pin（C4）——构建/运行已验证，镜像扫描因无扫描器未完成。
+- [[wiki/C3-CI首跑]]：GitHub Actions 远端首跑（C3）——两次运行、三类 Linux 兼容缺陷与 gitleaks 全历史扫描修复。
 - [[wiki/待核实问题]]：证据缺口。
 - [[wiki/使用指南]]：摄取、问答、巡检。
 - [[wiki/文档与决策规范]]：文档沉淀要求与证据驱动决策的调整记录。
