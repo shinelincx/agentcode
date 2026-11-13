@@ -26,7 +26,7 @@ jobs:
 
       # 只记录不拦截：首轮目标是量出 HIGH/CRITICAL 清单，阈值策略待结果出来后单独定
       - name: Trivy image scan (HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ matrix.image }}
           scanners: vuln
