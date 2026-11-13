@@ -10,6 +10,10 @@ Requirements document:
 
 $requirements_content
 
+Reviewer feedback from the previous human rejection of your DESIGN.md (R1):
+
+$rejection_feedback
+
 ## Task
 Write DESIGN.md with exactly this structure (keep the section headings verbatim):
 
@@ -33,6 +37,9 @@ Which AC from REQUIREMENTS.md maps to which file changes. One line per AC: `AC-N
 - Every AC-n declared in REQUIREMENTS.md must appear in `## 验收映射`; the orchestrator rejects designs that miss one.
 - File ownership must not overlap across lanes; use the directory names from Context.
 - Prefer the smallest change set that satisfies the ACs; do not add dependencies or new public interfaces unless an AC requires it.
+- If `Reviewer feedback` is present (not 无), judge it first: when it is valid, revise the design to
+  address it; when it is unwarranted or out of scope, keep the original design and say so in
+  `## 实现策略` with one short note. Either way you must still output a complete DESIGN.md.
 
 ## Output contract
 - Output ONLY the Markdown content, starting with `# DESIGN · task $task_id`.

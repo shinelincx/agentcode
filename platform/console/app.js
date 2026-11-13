@@ -151,10 +151,12 @@ function tasksTable(d, rows) {
 }
 
 function approvalsTable(d) {
-  return table(['任务', '闸门', '结论', '决策人', '时间'], d.approvals, a =>
+  return table(['任务', '闸门', '结论', '决策人', '理由', '时间'], d.approvals, a =>
     `<tr><td class="mono">${esc(a.task_id.slice(0, 8))}</td><td>${esc(a.gate_name)}</td>
      <td class="s-${decisionState(a.decision)}">${esc(decisionText(a.decision))}</td>
-     <td>${esc(a.decided_by || '-')}</td><td class="meta-text">${esc(a.decided_at || a.created_at)}</td></tr>`);
+     <td>${esc(a.decided_by || '-')}</td>
+     <td class="meta-text" title="${esc(a.reason || '')}">${esc(a.reason || '-')}</td>
+     <td class="meta-text">${esc(a.decided_at || a.created_at)}</td></tr>`);
 }
 
 function gatesTable(d) {
@@ -568,7 +570,9 @@ async function showDetail(taskId) {
   const apps = (data.approvals || []).map(a =>
     `<tr><td>${esc(a.gate_name)}</td>
      <td class="s-${decisionState(a.decision)}">${esc(decisionText(a.decision))}</td>
-     <td>${esc(a.decided_by || '-')}</td><td class="meta-text">${esc(a.decided_at || '-')}</td></tr>`).join('');
+     <td>${esc(a.decided_by || '-')}</td>
+     <td class="meta-text" title="${esc(a.reason || '')}">${esc(a.reason || '-')}</td>
+     <td class="meta-text">${esc(a.decided_at || '-')}</td></tr>`).join('');
   $('m-title').textContent = `任务 ${taskId.slice(0, 8)}`;
   $('m-body').innerHTML =
     `<div class="meta-text">状态 ${esc(stateText(data.task.status))} · 当前节点 ${esc(data.task.current_node || '-')}
@@ -581,8 +585,23 @@ async function showDetail(taskId) {
      <h3>产物</h3>
      <div class="table-wrap"><table><thead><tr><th>类型</th><th>路径</th><th>大小</th><th></th></tr></thead><tbody>${arts}</tbody></table></div>
      <h3>审批</h3>
-     ${apps ? `<div class="table-wrap"><table><thead><tr><th>闸门</th><th>结论</th><th>决策人</th><th>时间</th></tr></thead><tbody>${apps}</tbody></table></div>` : '<div class="empty">暂无审批记录</div>'}`;
+     ${apps ? `<div class="table-wrap"><table><thead><tr><th>闸门</th><th>结论</th><th>决策人</th><th>理由</th><th>时间</th></tr></thead><tbody>${apps}</tbody></table></div>` : '<div class="empty">暂无审批记录</div>'}`;
   $('modal').hidden = false;
+}
+
+/* ---------- 驳回理由（R1：必填，回传上游 Agent） ---------- */
+function showReject(taskId) {
+  $('m-title').textContent = `驳回 · ${taskId.slice(0, 8)}`;
+  $('m-body').innerHTML =
+    `<div class="meta-text">驳回理由必填（1~2000 字）。理由将回传给上游 Agent，由它判断是否按反馈修订产物后重新提审。</div>
+     <form id="reject-form" data-task="${esc(taskId)}" style="margin-top:12px">
+       <textarea id="reject-reason" rows="5" maxlength="2000" style="width:100%"
+         placeholder="例如：验收标准缺少移动端适配；G2 文件归属表未覆盖 AC-2；staging 冒烟未通过……"></textarea>
+       <div style="margin-top:10px"><button type="submit" class="btn btn-bad">确认驳回</button>
+         <span class="meta-text" id="reject-hint"></span></div>
+     </form>`;
+  $('modal').hidden = false;
+  $('reject-reason').focus();
 }
 
 /* ---------- 查询 ---------- */
@@ -623,6 +642,7 @@ document.addEventListener('click', e => {
   if (btn.dataset.art) return showArtifact(btn.dataset.art, btn.dataset.kind);
   if (btn.dataset.compare) return showRequirementCompare(btn.dataset.compare);
   if (btn.dataset.start) return act('/api/task/start', { task_id: btn.dataset.start });
+  if (btn.dataset.decide === 'rejected') return showReject(btn.dataset.task);
   if (btn.dataset.decide) return act('/api/task/decide',
     { task_id: btn.dataset.task, decision: btn.dataset.decide, by: 'console' });
   if (btn.dataset.detail) return showDetail(btn.dataset.detail);
@@ -656,6 +676,19 @@ document.addEventListener('change', e => {
 
 document.addEventListener('submit', async e => {
   if (e.target.id === 'q-form') { e.preventDefault(); runQuery(); return; }
+  if (e.target.id === 'reject-form') {
+    e.preventDefault();
+    const reason = ($('reject-reason').value || '').trim();
+    const hint = $('reject-hint');
+    if (!reason) { hint.textContent = '请填写驳回理由'; return; }
+    if (reason.length > 2000) { hint.textContent = '理由过长（≤2000 字）'; return; }
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    hint.textContent = '提交中…';
+    $('modal').hidden = true;
+    await act('/api/task/decide', { task_id: e.target.dataset.task, decision: 'rejected', reason, by: 'console' });
+    return;
+  }
   if (e.target.id !== 'act-form') return;
   e.preventDefault();
   const btn = $('at-submit'), out = $('at-result');

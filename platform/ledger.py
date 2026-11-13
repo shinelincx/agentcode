@@ -128,6 +128,10 @@ def _migrate(db: sqlite3.Connection):
     ):
         if name not in run_cols:
             db.execute(ddl)
+    # 驳回理由（R1）：审批表补 reason 列，旧库增量迁移
+    ap_cols = {row["name"] for row in db.execute("PRAGMA table_info(approvals)")}
+    if "reason" not in ap_cols:
+        db.execute("ALTER TABLE approvals ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
     # B2：retro_queue 升级为 outbox（至少一次投递 + 退避 + 死信）
     retro_sql = db.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='retro_queue'").fetchone()
@@ -484,14 +488,24 @@ def request_approval(db: sqlite3.Connection, task_id: str, gate_name: str,
     return cur.lastrowid
 
 
-def decide_approval(db: sqlite3.Connection, approval_id: int, decision: str, decided_by: str) -> bool:
-    """登记审批结论。decision ∈ approved|rejected。"""
+def decide_approval(db: sqlite3.Connection, approval_id: int, decision: str,
+                    decided_by: str, reason: str = "") -> bool:
+    """登记审批结论。decision ∈ approved|rejected；驳回时 reason 必填（由调用方校验）。"""
     db.execute(
-        "UPDATE approvals SET decision=?, decided_by=?, decided_at=datetime('now') WHERE id=? AND decision='pending'",
-        (decision, decided_by, approval_id),
+        "UPDATE approvals SET decision=?, decided_by=?, decided_at=datetime('now'), reason=? "
+        "WHERE id=? AND decision='pending'",
+        (decision, decided_by, (reason or "").strip(), approval_id),
     )
     db.commit()
     return db.total_changes > 0
+
+
+def latest_rejection_reason(db: sqlite3.Connection, task_id: str, gate_name: str) -> str:
+    """最近一次该闸门的驳回理由（供上游 Agent 决定是否按反馈修订产物）。"""
+    row = db.execute(
+        "SELECT reason FROM approvals WHERE task_id=? AND gate_name=? AND decision='rejected' "
+        "ORDER BY decided_at DESC, id DESC LIMIT 1", (task_id, gate_name)).fetchone()
+    return (row["reason"] if row else "") or ""
 
 
 def approval_valid(db: sqlite3.Connection, task_id: str, gate_name: str, artifact_hash: str) -> bool:

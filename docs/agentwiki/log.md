@@ -570,3 +570,13 @@
 - 验证：`ac_regression` 291 条 PASS=289 FAIL=0 SKIP=2（新增带图 201、详情原始字段+附件、图片回读、越界 404、非法类型 400 不落库）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；`codex exec -i` 真模型冒烟返回码 0；8879 浏览器目视参考图片控件与对比模态，无 JS 错误。
 - 未验证：真实带图任务的完整 G1 生成质量；WebP/GIF 在录入层被拒。
 - 文档：更新 [[wiki/平台看板]]（图文需求与对比评审小节、端点、体积/字段约束、验证证据）；[[index]] 条目描述更新。
+
+## [2026-11-13] feat | 人工驳回必填理由 + 上游 Agent 按理由判断修订
+- 触发：用户指示「人工审核节点，用户拒绝时要添加理由，然后上一步的agent判断要不要根据退回原因生成新的方案」。
+- 账本：`schema.sql` approvals 增 `reason` 列（旧库 `ALTER TABLE` 迁移）；`decide_approval(..., reason)` 写入；新增 `latest_rejection_reason()`。
+- 图：review_g1/g2/g3 驳回时取最近驳回理由写入图状态 `rejection_reason` 并转 `running` 回上游节点（原有回环语义不变）；需求/设计节点把理由作为 `$rejection_feedback` 注入模板并留痕 `requirements_revise`/`design_revise` 门禁结果；每闸门回环上限 `MAX_REVISES=5`，超限记 `revise_limit_*` 并终态 rejected。DeliveryState 补声明 `approved_g3`（此前 review_g3 写入被静默丢弃的隐患一并修复）。
+- 模板：requirements-gen 1.3.0 / design-gen 1.2.0 增 `$rejection_feedback` 与「先判断反馈是否成立：成立则修订，不成立则保留原文并注明分歧」约束；manifest 同步。
+- 控制台：`/api/task/decide` 驳回必填 `reason`（1~2000 字，缺/超 400），reason 贯通 enqueue/execute/decide_approval；`run_task.py reject --reason` 必填；审批 SELECT 与任务详情带出 `reason`；前端驳回按钮弹理由模态（空理由不放行），已决审批表与详情新增「理由」列。
+- 验证：`ac_regression` 295 条 PASS=293 FAIL=0 SKIP=2（新增驳回缺理由 400、带理由 202、理由入账+requirements_revise 留痕）；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；8879 浏览器核对驳回模态与无 JS 错误。
+- 未验证：真模型在真实驳回理由下「判断不修订」的分支；G3 驳回回实现节点时理由未注入实现 prompt（实现走设计产物，超出本轮范围）。
+- 文档：更新 [[wiki/平台看板]]（R1 小节、端点、防护、验证证据）；[[index]] 条目描述更新。

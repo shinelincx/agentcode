@@ -14,7 +14,7 @@
 写操作：
     POST /api/intake              新建任务（结构化表单）
     POST /api/task/start          启动任务（图跑到首个闸门或结束）
-    POST /api/task/decide         审批 G1/G2/G3（approved|rejected）
+    POST /api/task/decide         审批 G1/G2/G3（approved|rejected；驳回必填 reason，≤2000 字）
     POST /api/task/rerun          从指定节点重跑（body: task_id + from）
     POST /api/config              保存角色配置（预算/模型/门禁/部署/审批人；保留 YAML 注释）
     执行在线程池中的单线程队列串行进行（与 CLI 语义一致），HTTP 立即返回 202 + job_id。
@@ -291,11 +291,11 @@ def snapshot(db_path: Path, yaml_path: Path) -> dict:
             SELECT g.task_id, g.gate_name, g.passed, g.checked_at
             FROM gate_results g ORDER BY g.checked_at DESC LIMIT 15""")
         approvals = _rows(db, """
-            SELECT a.id, a.task_id, a.gate_name, a.decision, a.decided_by, a.created_at, a.decided_at
+            SELECT a.id, a.task_id, a.gate_name, a.decision, a.decided_by, a.reason, a.created_at, a.decided_at
             FROM approvals a ORDER BY a.id DESC LIMIT 12""")
         # 待审批单独取全量（最多 20），避免被后续已决记录挤出最近 12 条窗口
         pending_approvals = _rows(db, """
-            SELECT a.id, a.task_id, a.gate_name, a.decision, a.decided_by, a.created_at, a.decided_at
+            SELECT a.id, a.task_id, a.gate_name, a.decision, a.decided_by, a.reason, a.created_at, a.decided_at
             FROM approvals a WHERE a.decision='pending' ORDER BY a.id DESC LIMIT 20""")
         by_model = _rows(db, """
             SELECT COALESCE(model,'(unknown)') AS model, COALESCE(executor,'') AS executor,
@@ -371,7 +371,7 @@ def task_detail(db_path: Path, task_id: str) -> dict:
             SELECT gate_name, passed, output, checked_at FROM gate_results
             WHERE task_id=? ORDER BY checked_at DESC LIMIT 100""", (task_id,))
         approvals = _rows(db, """
-            SELECT id, gate_name, artifact_hash, decision, decided_by, created_at, decided_at
+            SELECT id, gate_name, artifact_hash, decision, decided_by, reason, created_at, decided_at
             FROM approvals WHERE task_id=? ORDER BY id DESC LIMIT 30""", (task_id,))
         artifacts = {}
         for kind in KINDS:
@@ -547,7 +547,7 @@ class ControlRunner:
             return [dict(j) for j in reversed(list(self._jobs.values()))][:20]
 
     def enqueue(self, task_id: str, action: str, *, decision: str = "",
-                by: str = "console", entry: str = "") -> dict:
+                by: str = "console", entry: str = "", reason: str = "") -> dict:
         row = _task_row(self.db_path, task_id)
         if row is None:
             raise ControlError(f"任务不存在：{task_id}", 404)
@@ -578,7 +578,8 @@ class ControlRunner:
                         f"任务 {task_id[:8]} 已有排队/执行中的操作：{job['action']}", 409)
             self._seq += 1
             job = {"job_id": f"job-{self._seq}", "task_id": task_id, "action": action,
-                   "decision": decision, "by": by, "entry": entry, "status": "queued",
+                   "decision": decision, "by": by, "entry": entry, "reason": reason,
+                   "status": "queued",
                    "message": "", "queued_at": _now(), "started_at": "", "ended_at": ""}
             self._jobs[job["job_id"]] = job
             if len(self._jobs) > 60:
@@ -617,7 +618,8 @@ class ControlRunner:
                 with _GRAPH_LOCK:
                     message = self.execute(job["task_id"], job["action"],
                                            decision=job["decision"], by=job["by"],
-                                           entry=job.get("entry", ""))
+                                           entry=job.get("entry", ""),
+                                           reason=job.get("reason", ""))
                 status = "done"
             except ControlError as exc:
                 message, status = str(exc), "failed"
@@ -627,7 +629,7 @@ class ControlRunner:
                 job.update(status=status, message=message, ended_at=_now())
 
     def execute(self, task_id: str, action: str, *, decision: str = "",
-                by: str = "console", entry: str = "") -> str:
+                by: str = "console", entry: str = "", reason: str = "") -> str:
         """同步执行一次动作并返回摘要（测试可直接调用）。"""
         from langgraph.types import Command
         import graph as g
@@ -647,6 +649,8 @@ class ControlRunner:
         elif action == "decide":
             if decision not in ("approved", "rejected"):
                 raise ControlError("decision 须为 approved 或 rejected", 400)
+            if decision == "rejected" and not (reason or "").strip():
+                raise ControlError("驳回必须填写理由（reason，1~2000 字）", 400)
             if not snap.next:
                 raise ControlError("当前没有挂起的闸门", 409)
             node = snap.next[0]
@@ -657,7 +661,7 @@ class ControlRunner:
                                            [snap.values.get(k) for k in keys])
             db = ledger.connect(self.db_path)
             try:
-                ledger.decide_approval(db, approval_id, decision, by)
+                ledger.decide_approval(db, approval_id, decision, by, reason)
             finally:
                 db.close()
             app.invoke(Command(resume=decision), cfg)
@@ -991,15 +995,24 @@ class Handler(BaseHTTPRequestHandler):
             decision = str(payload.get("decision") or "").strip()
             entry = str(payload.get("from") or "").strip()
             by = str(payload.get("by") or "console").strip()[:60] or "console"
+            # R1：驳回必须给理由（回传给上游 Agent 判断是否修订），1~2000 字
+            reason = " ".join(str(payload.get("reason") or "").split())
             if action == "decide" and decision not in ("approved", "rejected"):
                 self._json(400, {"error": "decision 须为 approved 或 rejected"})
                 return
+            if action == "decide" and decision == "rejected":
+                if not reason:
+                    self._json(400, {"error": "驳回必须填写理由（reason，1~2000 字）"})
+                    return
+                if len(reason) > 2000:
+                    self._json(400, {"error": "驳回理由过长（≤2000 字）"})
+                    return
             if action == "rerun" and not entry:
                 self._json(400, {"error": "缺少重跑起始节点 from"})
                 return
             try:
                 job = runner.enqueue(task_id, action, decision=decision, by=by,
-                                     entry=entry)
+                                     entry=entry, reason=reason)
             except ControlError as exc:
                 self._json(exc.code, {"error": str(exc)})
                 return

@@ -88,6 +88,11 @@ class DeliveryState(TypedDict, total=False):
     prototype_dir: str
     approved_g1: bool
     approved_g2: bool
+    approved_g3: bool
+    rejection_reason: str  # 最近一次人工驳回的理由（R1：回传给上游 Agent 判断是否修订）
+    revises_g1: int  # 各闸门驳回回环次数（防无限循环，超过上限判 rejected 终态）
+    revises_g2: int
+    revises_g3: int
     base_branch: str
     lanes: list  # [{name, node, branch, scope, prompt, commit_msg}]
     implement_summary: str
@@ -369,29 +374,53 @@ def requirements_node(state: DeliveryState) -> dict:
         ledger.record_gate_result(db, state["task_id"], "requirement_input", False,
                                   "state.requirement 为空，无法生成需求文档")
         ledger.set_task_status(db, state["task_id"], "gate_failed", node="requirements")
-        return {"requirements_doc": ""}
+        return {"requirements_doc": "", "rejection_reason": ""}
     attach_dir = RIVER_WS / state["task_id"] / "attachments"
     images: list[str] = []
     if attach_dir.is_dir():
         images = sorted(str(p) for p in attach_dir.iterdir()
                         if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg"))
     attachments = "\n".join(f"- {p}" for p in images) or "无"
+    # R1：被人工驳回过 → 把驳回理由交给需求 Agent，由它判断是否按反馈修订
+    feedback = (state.get("rejection_reason") or "").strip()
+    if feedback:
+        ledger.record_gate_result(db, state["task_id"], "requirements_revise", True,
+                                  f"按驳回理由修订第 {int(state.get('revises_g1') or 0)} 轮：{feedback[:200]}")
     doc = _run_doc_agent(state, node_name="requirements", template="requirements-gen",
-                         params={"raw_requirement": raw, "attachments": attachments},
+                         params={"raw_requirement": raw, "attachments": attachments,
+                                 "rejection_feedback": feedback or "无"},
                          filename="REQUIREMENTS.md",
                          required_headings=("## 需求", "## 验收标准", "## 非目标"),
                          images=images)
-    return {"requirements_doc": doc}
+    return {"requirements_doc": doc, "rejection_reason": ""}
+
+
+# 人工驳回 → 上游 Agent 修订的回环上限（R1）：超过即判 rejected 终态，防止无限回环烧预算
+MAX_REVISES = 5
 
 
 def review_g1(state: DeliveryState) -> Command:
-    """人工闸门 G1：interrupt 挂起，批准后前进，拒绝则回需求节点。"""
+    """人工闸门 G1：interrupt 挂起，批准后前进；驳回须带理由，回需求节点按理由修订（R1）。
+
+    修订轮次超过 MAX_REVISES 时终止为 rejected 终态，防止无限回环烧预算。
+    """
     decision = interrupt({"gate": "G1_requirements", "artifact": state["requirements_doc"]})
     if decision == "approved":
         db = _ledger()
         ledger.set_task_status(db, state["task_id"], "running")
-        return Command(goto="design", update={"approved_g1": True})
-    return Command(goto="requirements", update={"approved_g1": False})
+        return Command(goto="design", update={"approved_g1": True, "rejection_reason": ""})
+    db = _ledger()
+    reason = ledger.latest_rejection_reason(db, state["task_id"], "G1_requirements")
+    revises = int(state.get("revises_g1") or 0) + 1
+    if revises > MAX_REVISES:
+        ledger.record_gate_result(db, state["task_id"], "revise_limit_g1", False,
+                                  f"G1 驳回修订已达 {MAX_REVISES} 次上限，终止为 rejected")
+        ledger.set_task_status(db, state["task_id"], "rejected", node="requirements")
+        return Command(goto=END, update={"revises_g1": revises})
+    ledger.set_task_status(db, state["task_id"], "running")
+    return Command(goto="requirements",
+                   update={"approved_g1": False, "rejection_reason": reason,
+                           "revises_g1": revises})
 
 
 def _lane_table(design: str) -> tuple[list[str] | None, list[list[str]]]:
@@ -626,14 +655,21 @@ def design_node(state: DeliveryState) -> dict:
         ledger.record_gate_result(db, state["task_id"], "design_input", False,
                                   f"需求文档不可读：{req_path!r}")
         ledger.set_task_status(db, state["task_id"], "gate_failed", node="design")
-        return {"design_doc": ""}
+        return {"design_doc": "", "rejection_reason": ""}
     content = Path(req_path).read_text(encoding="utf-8")
+    # R1：被人工驳回过 → 把驳回理由交给设计 Agent，由它判断是否按反馈修订
+    feedback = (state.get("rejection_reason") or "").strip()
+    if feedback:
+        ledger.record_gate_result(db, state["task_id"], "design_revise", True,
+                                  f"按驳回理由修订第 {int(state.get('revises_g2') or 0)} 轮：{feedback[:200]}")
     doc = _run_doc_agent(state, node_name="design", template="design-gen",
-                         params={"requirements_content": content}, filename="DESIGN.md",
+                         params={"requirements_content": content,
+                                 "rejection_feedback": feedback or "无"},
+                         filename="DESIGN.md",
                          required_headings=("## 文件归属表", "## 实现策略", "## 验收映射"),
                          post_check=lambda text: _ac_coverage(text, content),
                          post_check_name="design_ac_coverage")
-    return {"design_doc": doc}
+    return {"design_doc": doc, "rejection_reason": ""}
 
 
 def _route_after_doc(state: DeliveryState, key: str) -> str:
@@ -652,12 +688,24 @@ def _route_after_review(state: DeliveryState) -> str:
 
 
 def review_g2(state: DeliveryState) -> Command:
+    """人工闸门 G2：批准后前进；驳回须带理由，回设计节点按理由修订（R1），上限同 G1。"""
     decision = interrupt({"gate": "G2_design", "artifact": state["design_doc"]})
     if decision == "approved":
         db = _ledger()
         ledger.set_task_status(db, state["task_id"], "running")
-        return Command(goto="implement", update={"approved_g2": True})
-    return Command(goto="design", update={"approved_g2": False})
+        return Command(goto="implement", update={"approved_g2": True, "rejection_reason": ""})
+    db = _ledger()
+    reason = ledger.latest_rejection_reason(db, state["task_id"], "G2_design")
+    revises = int(state.get("revises_g2") or 0) + 1
+    if revises > MAX_REVISES:
+        ledger.record_gate_result(db, state["task_id"], "revise_limit_g2", False,
+                                  f"G2 驳回修订已达 {MAX_REVISES} 次上限，终止为 rejected")
+        ledger.set_task_status(db, state["task_id"], "rejected", node="design")
+        return Command(goto=END, update={"revises_g2": revises})
+    ledger.set_task_status(db, state["task_id"], "running")
+    return Command(goto="design",
+                   update={"approved_g2": False, "rejection_reason": reason,
+                           "revises_g2": revises})
 
 
 def route_model(budget_state: str, role: str | None = None) -> str:
@@ -1611,13 +1659,24 @@ def deploy_node(state: DeliveryState) -> dict:
 
 
 def review_g3(state: DeliveryState) -> Command:
-    """人工闸门 G3：staging 验收（部署报告/环境）。拒绝则退回实现修复。"""
+    """人工闸门 G3：staging 验收（部署报告/环境）。驳回须带理由，回实现修复（R1），上限同 G1。"""
     decision = interrupt({"gate": "G3_staging", "artifact": state.get("deploy_report")})
     if decision == "approved":
         db = _ledger()
         ledger.set_task_status(db, state["task_id"], "running")
-        return Command(goto="retro", update={"approved_g3": True})
-    return Command(goto="implement", update={"approved_g3": False})
+        return Command(goto="retro", update={"approved_g3": True, "rejection_reason": ""})
+    db = _ledger()
+    reason = ledger.latest_rejection_reason(db, state["task_id"], "G3_staging")
+    revises = int(state.get("revises_g3") or 0) + 1
+    if revises > MAX_REVISES:
+        ledger.record_gate_result(db, state["task_id"], "revise_limit_g3", False,
+                                  f"G3 驳回修订已达 {MAX_REVISES} 次上限，终止为 rejected")
+        ledger.set_task_status(db, state["task_id"], "rejected", node="implement")
+        return Command(goto=END, update={"revises_g3": revises})
+    ledger.set_task_status(db, state["task_id"], "running")
+    return Command(goto="implement",
+                   update={"approved_g3": False, "rejection_reason": reason,
+                           "revises_g3": revises})
 
 
 def _generate_retro(state: DeliveryState, db, task_id: str, run: str,

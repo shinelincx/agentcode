@@ -15,6 +15,10 @@ copy and error states):
 
 $attachments
 
+Reviewer feedback from the previous human rejection of your REQUIREMENTS.md (R1):
+
+$rejection_feedback
+
 ## Task
 Write REQUIREMENTS.md with exactly this structure (keep the section headings verbatim):
 
@@ -38,6 +42,10 @@ Explicitly what is OUT OF SCOPE for this task. One short paragraph or bullets.
 - Reference images are supporting evidence: when an image conflicts with the text, follow the text
   and note the conflict under `## 需求`. Turn visual details into testable criteria where possible.
 - Do not describe the image files themselves (paths, sizes); describe the behavior they imply.
+- If `Reviewer feedback` is present (not 无), judge it first: when it is valid, revise the
+  requirements to address it; when it is unwarranted or conflicts with the raw requirement,
+  keep the original and note the disagreement under `## 需求`. Either way you must output a
+  complete REQUIREMENTS.md.
 
 ## Output contract
 - Output ONLY the Markdown content, starting with `# REQUIREMENTS · task $task_id`.

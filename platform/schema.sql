@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   artifact_hash TEXT NOT NULL,                          -- 被审产物哈希（批准后变更即失效）
   decision      TEXT NOT NULL DEFAULT 'pending'
                 CHECK (decision IN ('pending','approved','rejected')),
+  reason        TEXT NOT NULL DEFAULT '',                -- 驳回/批准理由（驳回必填，回传给上游 Agent）
   decided_by    TEXT,
   decided_at    TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))

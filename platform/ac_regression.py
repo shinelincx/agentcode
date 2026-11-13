@@ -1194,11 +1194,17 @@ def console01(ws: Path):
           and set(detail["artifacts"]) == {"requirements", "design", "prototype",
                                            "prototype_html", "test", "deploy"})
 
-    runner.execute(tid, "decide", decision="rejected")
-    check("G1 驳回回到需求节点并重新挂起",
+    try:
+        runner.execute(tid, "decide", decision="rejected")
+        check("G1 驳回缺理由被拒（ControlError 400）", False)
+    except dash.ControlError as exc:
+        check("G1 驳回缺理由被拒（ControlError 400）", exc.code == 400 and "理由" in str(exc))
+    runner.execute(tid, "decide", decision="rejected", reason="验收标准缺少移动端适配")
+    check("G1 驳回带理由后回需求节点修订并重新挂起",
           _count(db, "SELECT COUNT(*) FROM node_runs WHERE task_id=? "
                      "AND node_name='requirements'", (tid,)) >= 2
-          and db.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"] == "awaiting_human")
+          and db.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"] == "awaiting_human"
+          and ledger.latest_rejection_reason(db, tid, "G1_requirements") == "验收标准缺少移动端适配")
 
     runner.execute(tid, "decide", decision="approved")
     check("G1 批准后生成设计并挂起 G2",
@@ -1300,6 +1306,29 @@ def console01(ws: Path):
         status, _ = req("POST", "/api/task/decide",
                         {"task_id": tid2, "decision": "maybe"}, {"X-Control": "1"})
         check("非法审批结论被拒（400）", status == 400)
+        status, err = req("POST", "/api/task/decide",
+                          {"task_id": tid2, "decision": "rejected"}, {"X-Control": "1"})
+        check("驳回缺理由被拒（400）",
+              status == 400 and "理由" in (err.get("error") or ""))
+        status, _ = req("POST", "/api/task/decide",
+                        {"task_id": tid2, "decision": "rejected", "reason": "验收标准不可测"},
+                        {"X-Control": "1"})
+        check("驳回带理由受理（202）", status == 202)
+        state = "queued"
+        for _ in range(120):
+            _, jobs = req("GET", "/api/jobs")
+            if jobs.get("jobs") and jobs["jobs"][0]["status"] in ("done", "failed"):
+                state = jobs["jobs"][0]["status"]
+                break
+            time.sleep(0.1)
+        _, detail3 = req("GET", f"/api/task/detail?task_id={tid2}")
+        rejected_rows = [a for a in detail3.get("approvals", [])
+                         if a["decision"] == "rejected"]
+        check("驳回理由入账并触发需求修订回环",
+              state == "done"
+              and rejected_rows
+              and rejected_rows[0].get("reason") == "验收标准不可测"
+              and any(g["gate_name"] == "requirements_revise" for g in detail3.get("gates", [])))
         # 文本 + 图片需求：建任务 → 附件落盘 → 详情/附件接口回读 → 非法图片拒绝
         png_b64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
                    "hQGAhKmMIQAAAABJRU5ErkJggg==")

@@ -3,7 +3,7 @@
 用法：
     python platform/run_task.py <task_id> start            # 首次启动；已挂起则只打印挂起信息
     python platform/run_task.py <task_id> approve [--by X] # 批准当前闸门并继续
-    python platform/run_task.py <task_id> reject  [--by X] # 驳回当前闸门（回环重生成）
+    python platform/run_task.py <task_id> reject  [--by X] --reason "..."  # 驳回当前闸门（理由必填，回上游 Agent 修订）
     python platform/run_task.py <task_id> rerun --from <node>  # 从指定节点重跑（失败/终态任务）
     python platform/run_task.py <task_id> status           # 查看图状态/任务状态
 
@@ -138,7 +138,7 @@ def cmd_start(task_id: str) -> int:
     return 0
 
 
-def cmd_decide(task_id: str, decision: str, by: str) -> int:
+def cmd_decide(task_id: str, decision: str, by: str, reason: str = "") -> int:
     app, cfg = _app(), _cfg(task_id)
     snap = app.get_state(cfg)
     if not snap.next:
@@ -150,7 +150,7 @@ def cmd_decide(task_id: str, decision: str, by: str) -> int:
     approval_id = _ensure_approval(task_id, gate, [snap.values.get(k) for k in keys])
     db = ledger.connect(DB)
     try:
-        ledger.decide_approval(db, approval_id, decision, by)
+        ledger.decide_approval(db, approval_id, decision, by, reason)
     finally:
         db.close()
     app.invoke(Command(resume=decision), cfg)
@@ -192,6 +192,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("task_id")
     ap.add_argument("action", choices=("start", "approve", "reject", "rerun", "status"))
     ap.add_argument("--by", default="operator", help="审批人（写 approvals.decided_by）")
+    ap.add_argument("--reason", default="",
+                    help="驳回理由（reject 必填，1~2000 字；回传给上游 Agent 判断是否修订）")
     ap.add_argument("--from", dest="entry", default="",
                     help=f"rerun 的起始节点：{', '.join(graph.RERUN_ENTRY_NODES)}")
     ap.add_argument("--project", default=os.environ.get("AGENTCODE_PROJECT", "river"),
@@ -201,8 +203,16 @@ def main(argv: list[str]) -> int:
     if args.action == "start":
         return cmd_start(args.task_id)
     if args.action in ("approve", "reject"):
-        return cmd_decide(args.task_id, "approved" if args.action == "approve" else "rejected",
-                          args.by)
+        decision = "approved" if args.action == "approve" else "rejected"
+        if decision == "rejected":
+            reason = " ".join(args.reason.split())
+            if not reason:
+                raise SystemExit("驳回必须填写理由：--reason \"...\"（1~2000 字）")
+            if len(reason) > 2000:
+                raise SystemExit("驳回理由过长（≤2000 字）")
+        else:
+            reason = ""
+        return cmd_decide(args.task_id, decision, args.by, reason)
     if args.action == "rerun":
         return cmd_rerun(args.task_id, args.entry)
     return cmd_status(args.task_id)
