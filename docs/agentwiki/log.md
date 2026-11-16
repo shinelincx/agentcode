@@ -598,3 +598,10 @@
 - 回归：AC-02d 拒绝路径改内容维度（缺/空/超长/非法优先级）；CONSOLE-01 三处 payload 与断言改 content。专项 AC-02d+CONSOLE-01+PROMPT-01 58/58；全量 `ac_regression` 300 条 PASS=298 FAIL=0 GAP=0 SKIP=2；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；py_compile 与 node --check 通过。
 - 边界：旧任务 `templates.lock` 快照对 1.4.0 模板会检出内容哈希漂移（设计内检测）；历史任务 requirement.json 旧结构只在展示层兼容，写路径只接受新结构。
 - 文档：更新 [[wiki/平台看板]]（决策、写模式字段表、图文需求小节、验证证据）与 [[index]]，追加本日志。
+
+## [2026-11-16] review | Prompt 模板评审（提案，未实施）
+- 触发：用户要求分析 7 个 Prompt 模板并提出优化建议。
+- 范围：7 模板全文 + 渲染层 templates.py + 消费方门禁（_doc_gate/_lanes_from_design/_ac_coverage/PASS-FAIL 解析）+ golden.yaml 17 例 + prompt_eval token 成本。
+- 总评：六段式结构统一、输出契约基本可机检、SemVer+lock 哈希+漂移检测治理健全；缺口集中在信息注入不完整、个别硬约束未闭环、产出语言未声明。
+- 发现：P1 三项（F-1 design lane 值域未约束→归属表回退关键词路径真实存在；F-2 implement-lane 缺不弱化测试约束（gate-fix 有）；F-3 参考图片只进需求节点、原型 Agent 看不到）；P2 四项（产出语言、severity 枚举、复审无历史、scope 空值渲染）；P3 四项（AC 条数弹性、attempt 语义、retro 条目对齐 retro_queue、--live 基线）。详见 [[wiki/Prompt模板]]。
+- 边界：纯分析，未改任何模板/代码；改善幅度需 --live 对比验证。实施须 bump 版本、同步 golden 断言并跑 PROMPT-01/EVAL-01 及受影响节点专项。
