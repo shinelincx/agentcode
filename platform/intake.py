@@ -1,7 +1,10 @@
-"""结构化需求录入（A2 intake）· 校验 + 归一化 + 落库
+"""自由文本需求录入（A2 intake）· 校验 + 归一化 + 落库
+
+表单只收三个可填字段：内容（自由文本）、附件（参考图片）、优先级；
+标准需求规格书（REQUIREMENTS.md）由需求 Agent 转换生成，G1 评审时对照展示。
 
 两个入口：
-    看板写模式  POST /api/intake（dashboard.py --intake）
+    看板写模式  POST /api/intake（dashboard.py --control）
     CLI        python platform/intake.py create payload.json [--db ...] [--ws ...]
 
 存储约定：
@@ -27,14 +30,7 @@ PLATFORM = Path(__file__).parent
 DEFAULT_WS = PLATFORM.parent / "projects" / "river"
 DEFAULT_DB = DEFAULT_WS / "state.db"
 
-MAX_TITLE = 120
-MAX_GOAL = 2000
-MAX_AC = 12
-MAX_AC_LEN = 500
-MAX_NON_GOALS = 2000
-MAX_PATHS_PER_LANE = 20
-MAX_PATH_LEN = 200
-LANES = ("be", "fe")
+MAX_CONTENT = 8000
 
 # 参考图片：仅收 PNG/JPEG（codex -i 直接支持的格式），单张 ≤2MB、最多 4 张
 MAX_IMAGES = 4
@@ -113,68 +109,26 @@ def _images(payload: dict) -> list[dict]:
 
 
 def validate_payload(payload: dict) -> dict:
-    """校验并归一化表单字段；返回干净副本（未知字段丢弃）。"""
+    """校验并归一化表单字段；返回干净副本（未知字段丢弃）。
+
+    表单仅三个可填字段：content（必填自由文本）、priority、images。
+    结构化提炼（需求/验收标准/非目标）由需求 Agent 在 REQUIREMENTS.md 中完成。
+    """
     if not isinstance(payload, dict):
         raise IntakeError("请求体必须是 JSON 对象")
 
-    title = _text(payload, "title", required=True, limit=MAX_TITLE, label="标题")
-    goal = _text(payload, "goal", required=True, limit=MAX_GOAL, label="目标")
-
-    raw_ac = payload.get("acceptance_criteria")
-    if isinstance(raw_ac, str):
-        raw_ac = raw_ac.splitlines()
-    if not isinstance(raw_ac, list):
-        raise IntakeError("验收标准必须是列表或按行文本")
-    ac = [str(item).strip() for item in raw_ac if str(item).strip()]
-    if not ac:
-        raise IntakeError("验收标准至少需要 1 条")
-    if len(ac) > MAX_AC:
-        raise IntakeError(f"验收标准最多 {MAX_AC} 条（当前 {len(ac)}）")
-    for item in ac:
-        if len(item) > MAX_AC_LEN:
-            raise IntakeError(f"单条验收标准超过 {MAX_AC_LEN} 字符：{item[:40]}…")
-
-    non_goals = _text(payload, "non_goals", required=False, limit=MAX_NON_GOALS, label="非目标")
-
-    raw_scope = payload.get("scope") or {}
-    if not isinstance(raw_scope, dict):
-        raise IntakeError("涉及范围必须是 {lane: [路径]} 对象")
-    scope: dict[str, list[str]] = {}
-    for lane, paths in raw_scope.items():
-        if lane not in LANES:
-            raise IntakeError(f"未知 lane {lane!r}（仅支持 {LANES}）")
-        if isinstance(paths, str):
-            paths = [p.strip() for p in paths.split(",") if p.strip()]
-        if not isinstance(paths, list):
-            raise IntakeError(f"lane {lane} 的路径必须是列表或逗号分隔文本")
-        clean = [str(p).strip() for p in paths if str(p).strip()]
-        if len(clean) > MAX_PATHS_PER_LANE:
-            raise IntakeError(f"lane {lane} 路径最多 {MAX_PATHS_PER_LANE} 条")
-        for p in clean:
-            if len(p) > MAX_PATH_LEN:
-                raise IntakeError(f"路径过长（>{MAX_PATH_LEN}）：{p[:40]}…")
-        if clean:
-            scope[lane] = clean
+    content = _text(payload, "content", required=True, limit=MAX_CONTENT, label="内容")
 
     priority = (payload.get("priority") or "normal").strip()
     if priority not in ledger.PRIORITIES:
         raise IntakeError(f"优先级须为 {ledger.PRIORITIES} 之一，收到 {priority!r}")
 
-    return {"title": title, "goal": goal, "acceptance_criteria": ac,
-            "non_goals": non_goals, "scope": scope, "priority": priority,
-            "images": _images(payload)}
+    return {"content": content, "priority": priority, "images": _images(payload)}
 
 
 def normalize(payload: dict) -> str:
-    """结构化字段 → 归一化需求文本（喂给 requirements-gen 模板 / 存 tasks.requirement）。"""
-    lines = [f"# {payload['title']}", "", "## 目标", payload["goal"], "", "## 验收标准"]
-    lines += [f"- {item}" for item in payload["acceptance_criteria"]]
-    if payload["non_goals"]:
-        lines += ["", "## 非目标", payload["non_goals"]]
-    if payload["scope"]:
-        lines += ["", "## 涉及范围"]
-        for lane, paths in payload["scope"].items():
-            lines.append(f"- {lane}: " + ", ".join(paths))
+    """原始字段 → 归一化需求文本（喂给 requirements-gen 模板 / 存 tasks.requirement）。"""
+    lines = ["# 原始需求", "", payload["content"]]
     if payload.get("images"):
         lines += ["", "## 参考图片",
                   "以下图片随任务目录存放，需求节点会作为视觉参考一并送入模型："]

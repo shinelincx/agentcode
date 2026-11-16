@@ -319,21 +319,13 @@ function actionsView(d) {
     <section class="panel">
       <div class="panel-head"><h2>新建交付需求</h2><span class="meta-text">写入 ${esc(state.project)} 账本</span></div>
       <form class="card-body" id="act-form">
-        <label><b>标题 <span class="req">*</span></b>
-          <input id="at-title" maxlength="120" placeholder="例：stats 接口增加 startedAt 字段"></label>
-        <label><b>目标 <span class="req">*</span></b>
-          <textarea id="at-goal" placeholder="用户可观察的行为变化，一两句话说清"></textarea></label>
-        <label><b>验收标准 <span class="req">*</span></b>
-          <textarea id="at-ac" placeholder="一行一条，例：GET /api/stats 返回 ISO 8601 的 startedAt"></textarea></label>
-        <label>非目标<textarea id="at-non" placeholder="明确不做什么（可空）"></textarea></label>
-        <div class="row-2">
-          <label>后端范围（逗号分隔）<input id="at-be" placeholder="apps/api/src/**"></label>
-          <label>前端范围（逗号分隔）<input id="at-fe" placeholder="apps/web/src/**"></label>
-        </div>
+        <label><b>内容 <span class="req">*</span></b>
+          <span class="meta-text">自由文本：想做什么、为什么、有何约束；标准规格书由需求 Agent 转换生成</span>
+          <textarea id="at-content" rows="7" placeholder="例：stats 接口增加 startedAt 字段，前端要在房间页展示启动时间…"></textarea></label>
         <label>优先级<select id="at-prio">
           <option value="normal">normal</option><option value="high">high</option><option value="low">low</option>
         </select></label>
-        <label><b>参考图片</b> <span class="meta-text">PNG/JPEG，最多 4 张，单张 ≤2 MB</span>
+        <label><b>附件</b> <span class="meta-text">PNG/JPEG，最多 4 张，单张 ≤2 MB</span>
           <input id="at-images" type="file" accept="image/png,image/jpeg" multiple>
           <div id="at-thumbs" class="thumbs"></div></label>
         <label class="check-inline"><input type="checkbox" id="at-autostart" checked>
@@ -496,6 +488,12 @@ function fileToBase64(file) {
 }
 
 function originalHtml(o) {
+  if (o.content) {
+    return `<dl class="kv">
+      <dt>内容</dt><dd><pre class="doc">${esc(o.content)}</pre></dd>
+      <dt>优先级</dt><dd>${esc(o.priority || '-')}</dd>
+    </dl>`;
+  }
   const acs = (o.acceptance_criteria || []).map(x => `<li>${esc(x)}</li>`).join('');
   const scope = Object.entries(o.scope || {}).map(([k, v]) =>
     `<li>${esc(k)}: ${esc((v || []).join(', '))}</li>`).join('');
@@ -529,7 +527,8 @@ async function showRequirementCompare(taskId) {
   $('m-title').textContent = `原始需求 vs Agent 标准需求 · ${taskId.slice(0, 8)}`;
   $('m-body').innerHTML = `<div class="compare">
     <div class="cmp-col"><h3>原始需求（用户填写）</h3>
-      ${original.title ? originalHtml(original) : `<pre class="doc">${esc(rawText)}</pre>`}
+      ${(original.content || original.title)
+          ? originalHtml(original) : `<pre class="doc">${esc(rawText)}</pre>`}
       ${thumbsHtml(data.attachments)}
     </div>
     <div class="cmp-col"><h3>Agent 标准需求（REQUIREMENTS.md）</h3>
@@ -693,14 +692,7 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const btn = $('at-submit'), out = $('at-result');
   const payload = {
-    title: $('at-title').value.trim(),
-    goal: $('at-goal').value.trim(),
-    acceptance_criteria: $('at-ac').value.split('\n').map(x => x.trim()).filter(Boolean),
-    non_goals: $('at-non').value.trim(),
-    scope: {
-      be: $('at-be').value.split(',').map(x => x.trim()).filter(Boolean),
-      fe: $('at-fe').value.split(',').map(x => x.trim()).filter(Boolean),
-    },
+    content: $('at-content').value.trim(),
     priority: $('at-prio').value,
   };
   btn.disabled = true;
@@ -736,10 +728,7 @@ document.addEventListener('submit', async e => {
     }
     out.className = 'hint s-done';
     out.textContent = msg;
-    $('at-title').value = '';
-    $('at-goal').value = '';
-    $('at-ac').value = '';
-    $('at-non').value = '';
+    $('at-content').value = '';
     if ($('at-images')) $('at-images').value = '';
     if ($('at-thumbs')) $('at-thumbs').innerHTML = '';
     loadOverview(false);

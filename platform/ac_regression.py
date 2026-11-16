@@ -508,9 +508,8 @@ def ac02d(ws: Path):
     import graph as g
     import intake
 
-    base = {"title": "示例需求", "goal": "让 stats 返回 startedAt",
-            "acceptance_criteria": ["返回 ISO 8601 时间", "前端展示启动时间"],
-            "scope": {"be": ["apps/api/src/**"]}, "priority": "normal"}
+    base = {"content": "让 stats 返回 startedAt，前端要在房间页展示启动时间，"
+                       "时间格式用 ISO 8601。", "priority": "normal"}
 
     # 1) 校验拒绝路径（失败不得落库）
     def _task_count() -> int:
@@ -518,10 +517,10 @@ def ac02d(ws: Path):
         return _count(ledger.connect(path), "SELECT COUNT(*) FROM tasks") if path.exists() else 0
 
     for label, mutate in (
-        ("缺标题", lambda p: p.pop("title")),
-        ("空验收标准", lambda p: p.update(acceptance_criteria=[])),
+        ("缺内容", lambda p: p.pop("content")),
+        ("空内容", lambda p: p.update(content="   ")),
+        ("超长内容", lambda p: p.update(content="x" * 8001)),
         ("非法优先级", lambda p: p.update(priority="urgent")),
-        ("非法 lane", lambda p: p.update(scope={"db": ["x"]})),
     ):
         bad = copy.deepcopy(base)
         mutate(bad)
@@ -540,9 +539,12 @@ def ac02d(ws: Path):
     row = db.execute("SELECT requirement, priority, status FROM tasks WHERE id=?",
                      (result["task_id"],)).fetchone()
     check("intake 任务落库且 pending", row is not None and row["status"] == "pending")
-    check("归一化文本含标题与验收标准",
-          row["requirement"].startswith("# 示例需求") and "## 验收标准" in row["requirement"])
-    check("requirement.json 已落盘", Path(result["path"]).is_file())
+    check("归一化文本保留原始内容（自由文本，标准规格由需求 Agent 生成）",
+          row["requirement"].startswith("# 原始需求") and "startedAt" in row["requirement"])
+    record = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    check("requirement.json 已落盘且保存原始内容与优先级",
+          Path(result["path"]).is_file() and record["content"] == base["content"]
+          and record["priority"] == "normal")
 
     # 3) DESIGN.md 文件归属表 → lanes（intake 任务无需手写脚本）
     task_dir = ws / result["task_id"] / "docs"
@@ -1167,9 +1169,8 @@ def console01(ws: Path):
     _write_role_config(ws, deploy_cmd="stub-deploy")
 
     created = intake.create_task_from_payload(db_path, ws, {
-        "title": "console", "goal": "drive from web",
-        "acceptance_criteria": ["a1"], "non_goals": "",
-        "scope": {"be": ["apps/api/src/**"]}, "priority": "normal"})
+        "content": "console 驱动：让 stats 返回 startedAt 并在房间页展示，格式 ISO 8601。",
+        "priority": "normal"})
     tid = created["task_id"]
     runner = dash.ControlRunner(ws, db_path)
 
@@ -1277,8 +1278,8 @@ def console01(ws: Path):
         status, _ = req("POST", "/api/task/start", {"task_id": tid})
         check("缺少 X-Control 的写请求被拒（403）", status == 403)
         status, created2 = req("POST", "/api/intake", {
-            "title": "web", "goal": "from console", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {"be": ["apps/api/src/**"]}, "priority": "normal",
+            "content": "web 提需求：stats 接口增加 startedAt 字段，前端房间页展示启动时间。",
+            "priority": "normal",
         }, {"X-Intake": "1"})
         check("网页提需求返回 201 与 task_id",
               status == 201 and bool(created2.get("task_id")))
@@ -1333,15 +1334,15 @@ def console01(ws: Path):
         png_b64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
                    "hQGAhKmMIQAAAABJRU5ErkJggg==")
         status, created3 = req("POST", "/api/intake", {
-            "title": "web-img", "goal": "screenshot driven", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {}, "priority": "normal",
+            "content": "web-img 提需求：参考截图里的布局，stats 增加启动时间展示。",
+            "priority": "normal",
             "images": [{"name": "shot.png", "type": "image/png", "data": png_b64}],
         }, {"X-Intake": "1"})
         tid3 = created3.get("task_id", "") if isinstance(created3, dict) else ""
         check("网页提需求可带参考图片（201）", status == 201 and bool(tid3))
         status, detail3 = req("GET", f"/api/task/detail?task_id={tid3}")
-        check("任务详情返回原始需求字段与附件",
-              status == 200 and detail3.get("original", {}).get("title") == "web-img"
+        check("任务详情返回原始内容与附件",
+              status == 200 and detail3.get("original", {}).get("content", "").startswith("web-img")
               and (detail3.get("attachments") or [{}])[0].get("name") == "shot.png")
         status, blob = req("GET", f"/api/attachment?task_id={tid3}&name=attachments/1-shot.png")
         # req 对二进制按 utf-8 replace 解码（0x89 → U+FFFD），故只核对 PNG 文件头可读
@@ -1350,8 +1351,8 @@ def console01(ws: Path):
         check("附件路径越界被拒（404）", status == 404)
         before = _count(db, "SELECT COUNT(*) FROM tasks")
         status, err = req("POST", "/api/intake", {
-            "title": "bad-img", "goal": "x", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {}, "priority": "normal",
+            "content": "bad-img 提需求：附件类型不合法。",
+            "priority": "normal",
             "images": [{"name": "x.gif", "type": "image/gif", "data": png_b64}],
         }, {"X-Intake": "1"})
         check("图片类型不支持时拒绝且不落库",

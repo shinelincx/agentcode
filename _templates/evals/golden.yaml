@@ -10,7 +10,7 @@ cases:
       task_id: eval-req
       raw_requirement: 为任务列表增加按状态筛选，并记住用户上次选择的筛选条件
     assert:
-      contains: ["Write REQUIREMENTS.md", "## 非目标", "AC-1", "## Self-check"]
+      contains: ["Write REQUIREMENTS.md", "free-form", "## 非目标", "AC-1", "## Self-check"]
       not_contains: ["esbuild spawn EPERM"]
       max_chars: 6000
     output_assert:

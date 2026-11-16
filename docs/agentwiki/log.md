@@ -589,3 +589,12 @@
 - 浏览器与服务：重启 8879 旧监听进程加载后端修改；`#/settings` 实测 8 字段及两列布局、临时模型值保存→重载保持→还原、river/proj-b 配置源切换，无横向溢出和 JavaScript 错误。临时值最终已还原为 `gpt-6.1-terra`。
 - 边界：未调用真实供应方验证用户填写的模型名是否受支持；独立配置只影响下一次节点调用，不回溯历史调用。两个 SKIP 为既有外部环境场景，非本次失败。
 - 文档：更新 [[wiki/角色配置]]、[[wiki/平台看板]]、[[wiki/节点规则]] 与 [[index]]，追加本日志；25 个 Markdown 严格 UTF-8 解码通过，5 个变更文档的 Wiki/相对文件链接检查无错误。
+
+## [2026-11-16] feat | 需求表单精简为 内容+附件+优先级，标准化交由需求 Agent
+- 触发：用户指示新增需求只需「内容、附件、优先级」三个可填字段，再通过需求 Agent 转换成标准的需求规格书。
+- 后端：`intake.validate_payload` 重构——内容必填（≤8000 字自由文本）+ 优先级枚举 + 附件校验（沿用 PNG/JPEG ≤4 张 ≤2MB）；删除标题/目标/验收标准/非目标/范围字段。归一化文本为 `# 原始需求` + 内容 + `## 参考图片`；`requirement.json` 保存 `{content, priority, attachments}`。CLI 入口与失败不落库语义不变。
+- 前端：新建需求表单仅三字段（内容 textarea、优先级、附件多选）；「原始 vs 标准需求」左栏对新任务渲染 content + 缩略图，历史任务仍按 title/goal/验收标准结构化字段渲染（兼容不失效）。
+- 模板：`requirements-gen` 1.3.0 → 1.4.0（manifest 顶层 1.4.0）——明确输入为自由文本、由 Agent 提炼标准规格书；参数不变；黄金用例 req-basic 新增 `free-form` 语义断言。
+- 回归：AC-02d 拒绝路径改内容维度（缺/空/超长/非法优先级）；CONSOLE-01 三处 payload 与断言改 content。专项 AC-02d+CONSOLE-01+PROMPT-01 58/58；全量 `ac_regression` 300 条 PASS=298 FAIL=0 GAP=0 SKIP=2；`graph_smoke` 12/12、`smoke_test` 20/20、`prompt_eval` 17/17；py_compile 与 node --check 通过。
+- 边界：旧任务 `templates.lock` 快照对 1.4.0 模板会检出内容哈希漂移（设计内检测）；历史任务 requirement.json 旧结构只在展示层兼容，写路径只接受新结构。
+- 文档：更新 [[wiki/平台看板]]（决策、写模式字段表、图文需求小节、验证证据）与 [[index]]，追加本日志。
