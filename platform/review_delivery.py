@@ -11,6 +11,9 @@ import worker as w
 import ledger
 
 
+_HUNK = re.compile(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
 def approved_prototype(db, task, design_doc, prototype_dir, approved_design):
     """Read the same artifact bytes used to verify the G2 approval digest."""
     if not prototype_dir:
@@ -69,7 +72,27 @@ def paths(repo, base, head):
     return list(filter(None, raw.split("\0")))
 
 
-def collect(repo, delivery, lanes, budget, context_paths=()):
+def _head_excerpt(blob, patch, budget):
+    """Keep numbered HEAD lines around every hunk when the full file exceeds its share."""
+    lines = blob.splitlines()
+    ranges = []
+    for hunk in _HUNK.finditer(patch):
+        start = int(hunk[3])
+        count = int(hunk[4]) if hunk[4] is not None else 1
+        first, last = max(1, start - 12), min(len(lines), start + max(count - 1, 0) + 12)
+        if first > last:
+            continue
+        if ranges and first <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], last))
+        else:
+            ranges.append((first, last))
+    excerpts = ["\n".join(f"{number}: {lines[number - 1]}" for number in range(first, last + 1))
+                for first, last in ranges]
+    text = "HEAD 源码片段，行号为原文件坐标。\n" + "\n…\n".join(excerpts)
+    return (text, ranges) if ranges and len(text) <= budget else ("", [])
+
+
+def collect(repo, delivery, lanes, budget, context_paths=(), *, visible_head=None):
     if not delivery or not delivery.get("commits"):
         raise ValueError("缺少交付提交快照，请从实现节点重跑")
     base, parts = delivery["base"], delivery["commits"]
@@ -109,9 +132,18 @@ def collect(repo, delivery, lanes, budget, context_paths=()):
                 source.append(f"{path}：已删除，请查看 BASE")
                 continue
             gaps.append(f"{path}：无法读取 HEAD 源码")
-        elif "\0" in blob or "\ufffd" in blob or len(blob) > shares:
-            gaps.append(f"{path}：源码为二进制、编码不可用或内容已截断")
-        source.append(f"--- {path} ---\n" + (blob[:shares] if not rc and "\0" not in blob else "（源码不可用）"))
+        elif "\0" in blob or "\ufffd" in blob:
+            gaps.append(f"{path}：源码为二进制或编码不可用")
+        elif len(blob) > shares:
+            if patch and len(patch) <= shares and visible_head is not None:
+                excerpt, ranges = _head_excerpt(blob, patch, shares)
+                if ranges:
+                    source.append(f"--- {path} ---\n{excerpt}")
+                    visible_head[path] = ranges
+                    continue
+            gaps.append(f"{path}：源码和必要片段超出取证预算")
+        source.append(f"--- {path} ---\n" +
+                      (blob[:shares] if not rc and "\0" not in blob and "\ufffd" not in blob else "（源码不可用）"))
     return base, head, files, "\n".join(diff), "\n".join(source), gaps
 
 
@@ -177,7 +209,7 @@ def schema():
 
 
 def validate(repo, message, base, head, files, criteria, records, downstream, lanes, gaps,
-             *, approved_gates=None, approved_tests=None):
+             *, approved_gates=None, approved_tests=None, visible_head=None):
     report = json.loads(message)
     def shape(value, spec):
         kind = spec["type"]
@@ -194,6 +226,9 @@ def validate(repo, message, base, head, files, criteria, records, downstream, la
 
     def in_blob(commit, path, start, end):
         rc, blob = w.git(repo, "show", f"{commit}:{path}")
+        ranges = (visible_head or {}).get(path) if commit == head else None
+        if ranges is not None and not any(first <= start <= end <= last for first, last in ranges):
+            return False
         return rc == 0 and 0 < start <= end <= len(blob.splitlines())
 
     rows = {row["ac"]: row for row in report["criteria"]}
@@ -228,7 +263,7 @@ def validate(repo, message, base, head, files, criteria, records, downstream, la
             valid = path in files and end - start <= 20 and in_blob(commit, path, start, end)
             if valid:
                 patch = git(repo, "diff", "--no-ext-diff", "--no-renames", "-U0", base, head, "--", f":(literal){path}")
-                hunks = re.findall(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", patch)
+                hunks = _HUNK.findall(patch)
                 i = 0 if side == "BASE" else 2
                 valid = any(int(h[i]) <= start <= end < int(h[i]) + int(h[i+1] or 1) for h in hunks)
         owners = [lane["name"] for lane in lanes if any(fnmatch.fnmatchcase(path, pat)

@@ -2661,6 +2661,31 @@ def review_delivery01(ws: Path):
                 check("从部署重跑也不能越过延期的测试证据", not deploy["deploy_report"] and not staging.called
                       and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? AND gate_name='deploy_deferred_tests' AND passed=0",
                                  (light,)) == 1)
+
+            rows = [f"line {n:04}\n" for n in range(1, 1100)]
+            write(names["be"], "".join(rows))
+            git("add", "--", names["be"])
+            git("commit", "-qm", "large baseline")
+            long_base = git("rev-parse", "HEAD")
+            rows[899] = "verified change\n"
+            write(names["be"], "".join(rows))
+            git("add", "--", names["be"])
+            git("commit", "-qm", "edit around line 900")
+            long_head = git("rev-parse", "HEAD")
+            ranges = {}
+            data = {"base": long_base, "commits": [{"lane": "be", "commit": long_head}]}
+            long_lanes = [lane for lane in lanes if lane["name"] == "be"]
+            _, _, changed, _, snippets, gaps = rd.collect(str(repo), data, long_lanes, 2000, visible_head=ranges)
+            check("大文件保留变更附近的原始行号且证据齐全",
+                  not gaps and "900: verified change" in snippets and "line 0001" not in snippets)
+            row = {"ac": "AC-1", "status": "VERIFIED", "source": "HEAD", "ref": names["be"], "line": 900}
+            message = {"verdict": "PASS", "reason": "verified change", "criteria": [row], "findings": []}
+            args = (long_base, long_head, changed, {"AC-1": names["be"]}, {}, {}, long_lanes, gaps)
+            accepted, _ = rd.validate(str(repo), json.dumps(message), *args, visible_head=ranges)
+            row["line"] = 1
+            check("审查只能引用实际展示的 HEAD 片段",
+                  accepted["verdict"] == "PASS" and invalid(lambda: rd.validate(
+                      str(repo), json.dumps(message), *args, visible_head=ranges)))
         db.close()
 
 

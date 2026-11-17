@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -201,6 +202,8 @@ def _gate_stream(data: bytes | None) -> str:
 def run_gate(command: str, workdir: str, timeout: int = 900) -> GateResult:
     """Run outside the Worker sandbox and retain the process outcome separately from output."""
     start = time.monotonic()
+    if command.startswith("{project-run} "):
+        command = f'"{sys.executable}" "{Path(__file__).with_name("project_runs.py")}" ' + command[len("{project-run} "):]
     try:
         proc = subprocess.Popen(
             command, shell=True, cwd=str(workdir), stdout=subprocess.PIPE, stderr=subprocess.PIPE,

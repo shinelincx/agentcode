@@ -1586,10 +1586,26 @@ def _project_config() -> dict:
         return {}
     try:
         import yaml
-        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         print(f"[config] project.yaml 解析失败：{exc}")
         return {}
+    if config.get("project") == "proj-b" and os.environ.get("AGENTCODE_PROJECT_PROFILE") == "acceptance":
+        profile = yaml.safe_load(path.with_name("project.acceptance.yaml").read_text(encoding="utf-8"))
+        if not isinstance(profile, dict):
+            raise ValueError("proj-b 验收配置必须是映射")
+
+        def overlay(original, overrides):
+            merged = dict(original)
+            for key, value in overrides.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = overlay(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
+
+        config = overlay(config, profile)
+    return config
 
 
 def _repo_path() -> str:
@@ -1770,8 +1786,9 @@ def review_node(state: DeliveryState) -> dict:
                     if (match := _AC_MAPPING.fullmatch(line))}
         lanes = state.get("approved_lane_plan") or state.get("lanes") or []
         delivery = state.get("delivery") or {}
+        visible_head = {}
         base, head, files, diff, sources, gaps = rd.collect(repo, delivery, lanes, _rule_int("review", "diff_max"),
-                                                            criteria.values())
+                                                            criteria.values(), visible_head=visible_head)
         ledger.record_gate_result(db, task_id, "review_commits", True, f"{base}..{head}", node_run_id=run)
         ledger.record_gate_result(db, task_id, "review_lane_scope", True, "各提交均符合批准范围", node_run_id=run)
         gate_records = rd.gates(db, task_id, delivery, lambda lane: _implement_gate_specs(config, lane))
@@ -1827,7 +1844,8 @@ def review_node(state: DeliveryState) -> dict:
             if not r.ok or _lane_status(repo) != (0, "") or rd.revision(repo, "HEAD") != head:
                 raise ValueError(f"审查 Worker 执行失败或交付版本发生变化（退出码 {r.returncode}）")
             result, fixes = rd.validate(repo, r.message, base, head, files, criteria, gate_records, downstream, lanes, gaps,
-                                       approved_gates=approved_gates, approved_tests=approved_tests)
+                                       approved_gates=approved_gates, approved_tests=approved_tests,
+                                       visible_head=visible_head)
             verdict, reason = result["verdict"], result["reason"]
             if verdict == "PASS":
                 deferred_tests = {row["ref"]: downstream[row["ref"]] for row in result["criteria"]
@@ -2120,6 +2138,14 @@ def deploy_node(state: DeliveryState) -> dict:
     for index, command in enumerate(commands, start=1):
         if not ok:
             break
+        if "{delivery_head}" in command:
+            if not head:
+                ok = False
+                reason = "部署命令要求已验收的交付提交"
+                ledger.record_gate_result(db, task_id, "deploy_delivery", False, reason, node_run_id=run)
+                steps.append(("delivery", "", False, reason))
+                break
+            command = command.replace("{delivery_head}", head)
         passed, out = w.run_gate(command, repo, timeout=timeout)
         ledger.record_gate_result(db, task_id, f"deploy_step_{index}", passed, out, node_run_id=run)
         steps.append((f"step{index}", command, passed, out))
