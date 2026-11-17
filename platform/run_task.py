@@ -22,6 +22,7 @@ import graph
 import intake
 import ledger
 import task_approval
+import task_execution
 
 WS = graph.RIVER_WS
 DB = WS / "state.db"
@@ -83,8 +84,15 @@ def _report(app, cfg, task_id: str, *, register: bool = False) -> None:
             out[key] = snap.values[key]
     print(json.dumps(out, ensure_ascii=False, indent=2))
     if snap.next:
-        print(f"\n挂起于 {snap.next[0]}：请审阅产物后执行 "
-              f"`run_task.py {task_id} approve` 或 `reject`")
+        node = snap.next[0]
+        if node in task_approval.GATES:
+            print(f"\n挂起于 {node}：请审阅产物后执行 "
+                  f"`run_task.py {task_id} approve` 或 `reject`")
+        elif node in task_execution.REPLAYABLE_NODES:
+            print(f"\n检查点停在 {node}：若执行已中断，请运行 "
+                  f"`run_task.py {task_id} rerun --from {node}`")
+        else:
+            print(f"\n检查点停在 {node}：若执行已中断，需人工核查旧进程、产物和副作用")
 
 
 def _inflight_guard(task_id: str) -> None:
@@ -126,7 +134,7 @@ def cmd_decide(task_id: str, decision: str, by: str, reason: str = "") -> int:
 
 
 def cmd_rerun(task_id: str, entry: str) -> int:
-    """从指定节点重跑：要求图未挂起（挂起时用 approve/reject）。"""
+    """从指定节点重跑，或恢复中断的只读文档节点。"""
     if not entry:
         raise SystemExit(f"缺少 --from <node>（可用：{', '.join(graph.RERUN_ENTRY_NODES)}）")
     if entry not in graph.RERUN_ENTRY_NODES:
@@ -136,10 +144,9 @@ def cmd_rerun(task_id: str, entry: str) -> int:
     snap = app.get_state(cfg)
     if not snap.values:
         raise SystemExit("任务尚无图状态，无法重跑（先 start）")
-    if snap.next:
-        raise SystemExit(f"任务挂起于 {snap.next[0]}，请先 approve/reject，而不是重跑")
-    graph.reset_task_for_rerun(task_id, entry)
-    app.invoke(graph.rerun_payload(task_id, entry), cfg)
+    if not task_execution.resume_interrupted(DB, task_id, app, cfg, snap, entry):
+        graph.reset_task_for_rerun(task_id, entry)
+        app.invoke(graph.rerun_payload(task_id, entry), cfg)
     _report(app, cfg, task_id, register=True)
     return 0
 
@@ -167,6 +174,16 @@ def main(argv: list[str]) -> int:
                     help="目标项目名（projects/<name>），默认 river，可由 AGENTCODE_PROJECT 覆盖")
     args = ap.parse_args(argv)
     _select_project(args.project)
+    if args.action == "status":
+        return cmd_status(args.task_id)
+    try:
+        with task_execution.exclusive(WS):
+            return _write_action(args)
+    except task_execution.ExecutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _write_action(args: argparse.Namespace) -> int:
     if args.action == "start":
         return cmd_start(args.task_id)
     if args.action in ("approve", "reject"):
@@ -180,9 +197,7 @@ def main(argv: list[str]) -> int:
         else:
             reason = ""
         return cmd_decide(args.task_id, decision, args.by, reason)
-    if args.action == "rerun":
-        return cmd_rerun(args.task_id, args.entry)
-    return cmd_status(args.task_id)
+    return cmd_rerun(args.task_id, args.entry)
 
 
 if __name__ == "__main__":

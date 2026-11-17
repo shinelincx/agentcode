@@ -8,6 +8,7 @@ projects/*/*/
 # 运行态数据库
 projects/*/state.db*
 projects/*/graph.db*
+projects/*/.execution.lock
 projects/state.db*
 # Python 缓存
 __pycache__/

@@ -305,6 +305,21 @@ def ac03(ws: Path):
                      "GROUP BY operation_key HAVING COUNT(*)>1)") == 0)
 
 
+# ---------------- AC-04 双进程接管与恢复 ----------------
+
+def ac04(_ws: Path):
+    import unittest
+
+    from recovery_test import Recovery
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Recovery)
+    tests = list(suite)
+    result = suite.run(unittest.TestResult())
+    failures = dict(result.errors + result.failures)
+    for test in tests:
+        check(test.id().rsplit(".", 1)[-1], test not in failures, failures.get(test, ""))
+
+
 # ---------------- AC-05 迁移脚本中断续跑 ----------------
 
 def ac05(ws: Path):
@@ -3440,9 +3455,11 @@ def kill01(ws: Path):
         "import pathlib, time\n"
         "import sys\n"
         "p = pathlib.Path(sys.argv[1])\n"
-        "for i in range(600):\n"
-        "    p.write_text('x' * (i + 1))\n"
-        "    time.sleep(0.05)\n", encoding="utf-8")
+        "with p.open('a', encoding='ascii') as beat:\n"
+        "    for _ in range(600):\n"
+        "        beat.write('x')\n"
+        "        beat.flush()\n"
+        "        time.sleep(0.05)\n", encoding="utf-8")
     beat_codex = root / "beat-codex.txt"
     beat_gate = root / "beat-gate.txt"
     cmd = root / "fake-codex.cmd"
@@ -3551,7 +3568,7 @@ CASES = {
     "AC-02f": ac02f,
     "AC-02g": ac02g,
     "AC-02h": ac02h,
-    "AC-03": ac03,
+    "AC-03": ac03, "AC-04": ac04,
     "AC-05": ac05, "AC-06": ac06, "AC-07": ac07, "AC-08": ac08, "AC-09": ac09,
     "AC-11": ac11, "AC-12": ac12, "AC-13": ac13, "AC-14": ac14,
     "ROLE-01": role01, "ROLE-02": role02,
@@ -3581,7 +3598,6 @@ CASES = {
     "KILL-01": kill01,
 }
 NOT_IN_P1 = {
-    "AC-04": "双 Worker 租约——B1 首验见 AC-02e（旧 epoch 拒写 + 凭据隔离）；双进程接管演练待 B 组",
     "AC-10": "契约版本失效传播 → P3",
 }
 
