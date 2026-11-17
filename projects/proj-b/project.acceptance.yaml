@@ -1,0 +1,14 @@
+# 仅在 AGENTCODE_PROJECT_PROFILE=acceptance 时启用隔离服务和 G3。
+tech_stack:
+  lane_gate_commands:
+    be:
+      typecheck: '{project-run} proj-b-compile'
+      unit: '{project-run} proj-b-integration'
+test:
+  gates: [typecheck, unit, build]
+deploy:
+  staging:
+    required: true
+    commands:
+      - '{project-run} staging proj-b {delivery_head}'
+    timeout_seconds: 900

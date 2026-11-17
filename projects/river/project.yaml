@@ -2,7 +2,7 @@
 # 消费方：platform 编排器（P1）。预算模型：事后计量 + 边界控制（V2.2 §8）。
 
 project: river
-repo_path: d:\project\river
+repo_path: D:\project\river
 workspace: d:\project\AgentCode\projects\river   # 账本 state.db 与 lane worktree 所在（不污染业务仓库）
 
 executor:
@@ -63,7 +63,7 @@ deploy:                      # 部署角色（staging）
   staging:
     required: true           # 任一部署/冒烟/健康检查失败 → gate_failed（不再显式跳过）
     commands:
-      # 必须在同一个 WSL 会话内完成 build → up → 冒烟：跨命令 WSL 会被回收，容器随之停止
-      - 'wsl -d Debian -- bash -lc "cd /mnt/d/project/river && docker compose -f docker-compose.staging.yml up -d --build && SMOKE_RESTART=1 bash infra/docker/staging-smoke.sh"'
-    healthcheck: http://localhost:8080/api/stats
+      - '{project-run} staging river {delivery_head}'
+    # 部署命令在同一个 WSL 周期内核对镜像、readiness 和业务烟测。
+    healthcheck: ""
     timeout_seconds: 900

@@ -22,6 +22,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ledger
@@ -987,6 +988,209 @@ def ac07(ws: Path):
     check("全部动作留痕（孤儿/移动/错误可审计）",
           len(applied["orphans"]) == 1 and len(applied["moved"]) == 1 and not applied["errors"])
 
+
+# ---------------- P3 契约失效与并发隔离 ----------------
+
+@patch.object(_worker_mod, "git", _REAL_GIT)
+def contract01(ws: Path):
+    """实际 Git 提交和两个登记消费者探针沿独立测试和部署入口。"""
+    import graph as g
+    import review_delivery as rd
+    import worker
+
+    db = new_db(ws)
+    repo = ws / "repo"
+    repo.mkdir()
+    git = lambda *args: rd.git(str(repo), *args).strip()
+    git("init")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    contract = repo / "contract.json"
+    contract.write_text('{"name": "river", "id": 1}', encoding="utf-8")
+    (repo / "consumer.py").write_text(
+        "import json, sys\nfrom pathlib import Path\n"
+        "assert sys.argv[1] in json.loads(Path('contract.json').read_text())\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "Compatible contract")
+    old = git("rev-parse", "HEAD")
+    contract.write_text('{"name": "river"}', encoding="utf-8")
+    git("add", "contract.json")
+    git("commit", "-m", "Remove an existing field")
+    broken = git("rev-parse", "HEAD")
+    py = f'"{sys.executable}"'
+    config = {"repo_path": str(repo), "test": {"gates": ["unit"]},
+              "tech_stack": {"gate_commands": {"unit": f'{py} -m json.tool contract.json'}},
+              "contracts": {"paths": ["contract.json"],
+              "consumers": {"web": f"{py} consumer.py name", "worker": f"{py} consumer.py id"}}}
+
+    def state(head):
+        return {"task_id": ledger.create_task(db, head), "delivery": {"commits": [{"lane": "producer", "commit": head}]}}
+
+    def passed(state, gate):
+        row = db.execute("SELECT passed FROM gate_results WHERE task_id=? AND gate_name=? ORDER BY id DESC",
+                         (state["task_id"], gate)).fetchone()
+        return row and bool(row["passed"])
+
+    with patch.multiple(g, RIVER_WS=ws, USAGE_BUFFER=ws / "usage_buffer.jsonl",
+                        _project_config=lambda: config), patch.object(worker, "run_gate", _REAL_RUN_GATE):
+        git("switch", "--detach", old)
+        original = state(old)
+        original.update(g.test_node(original))
+        check("原提交登记两个消费者通过后可进入部署阶段",
+              passed(original, "test_contract:web") and passed(original, "test_contract:worker")
+              and g.deploy_node(original)["deploy_skipped"])
+
+        config["contracts"]["consumers"]["worker"] += " changed"
+        check("同一提交变更消费者命令后原凭证失效", not g.deploy_node(original)["deploy_report"]
+              and passed(original, "deploy_contract") is False)
+        config["contracts"]["consumers"]["worker"] = f"{py} consumer.py id"
+        git("switch", "--detach", broken)
+        changed = {**original, "delivery": {"commits": [{"lane": "producer", "commit": broken}]}}
+        deployed = ws / "deployed.txt"
+        config["deploy"] = {"staging": {"required": True, "commands": [
+            f"""{py} -c "from pathlib import Path; Path(r'{deployed}').touch()" """.strip()]}}
+        ledger.set_task_status(db, changed["task_id"], "running")
+        check("交付提交变更触发旧凭证失效，部署命令未执行", not g.deploy_node(changed)["deploy_report"]
+              and passed(changed, "deploy_contract") is False and not deployed.exists())
+
+        incompatible = state(broken)
+        incompatible.update(g.test_node(incompatible))
+        check("不兼容提交实跑两个消费者，现有字段消费者失败",
+              passed(incompatible, "test_contract:web") and passed(incompatible, "test_contract:worker") is False
+              and not incompatible["test_receipt"])
+        git("switch", "--detach", old)
+        rebuilt = state(old)
+        rebuilt.update(g.test_node(rebuilt))
+        check("旧提交从 Git 归档可重建且独立复验通过",
+              bool(original["test_receipt"]) and bool(rebuilt["test_receipt"])
+              and rebuilt["test_receipt"]["contract"] == original["test_receipt"]["contract"]
+              and rebuilt["test_receipt"]["run"] != original["test_receipt"]["run"])
+
+
+@patch.object(_worker_mod, "git", _REAL_GIT)
+def parallel_isolation01(ws: Path):
+    """并行运行两个带数据的真实回环服务，并演练 worktree 清理。"""
+    from contextlib import ExitStack
+    import os
+    import subprocess
+    import urllib.request
+
+    import maintenance
+    import review_delivery as rd
+    import task_execution
+
+    db = new_db(ws)
+    repo = ws / "repo"
+    repo.mkdir()
+    root = repo / ".worktrees"
+    root.mkdir()
+    git = lambda *args: rd.git(str(repo), *args).strip()
+    git("init")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    git("commit", "--allow-empty", "-m", "Lane baseline")
+    pending = ledger.create_task(db, "interrupted")
+    recovered = root / "recover"
+    recovered.mkdir()
+    run = ledger.start_node_run(db, pending, "implement", worktree=str(recovered))
+    ledger.record_operation(db, pending, "pending:test", "git_commit_intent", "tree", node_run_id=run, status="pending")
+    ledger.finish_node_run(db, run, "failed")
+    ledger.set_task_status(db, pending, "gate_failed")
+    orphan = root / "orphan"
+    orphan.mkdir()
+    service = (
+        "import http.server, json, os, pathlib, sqlite3\n"
+        "root = pathlib.Path.cwd()\n"
+        "with sqlite3.connect(root / 'lane.db') as db:\n"
+        "    db.execute('CREATE TABLE items(value TEXT)')\n"
+        "    db.execute('INSERT INTO items VALUES (?)', (os.environ['FIXTURE_LANE'],))\n"
+        "    value = db.execute('SELECT value FROM items').fetchone()[0]\n"
+        "(root / 'index.html').write_text(value)\n"
+        "with http.server.HTTPServer(('127.0.0.1', 0), http.server.SimpleHTTPRequestHandler) as server:\n"
+        "    print(server.server_port, flush=True)\n"
+        "    server.serve_forever()\n"
+    )
+    with ExitStack() as running:
+        processes = {}
+        for name in ("frontend", "backend"):
+            lane = root / name
+            git("worktree", "add", "-b", f"fixture/{name}", str(lane))
+            task = ledger.create_task(db, name)
+            run = ledger.start_node_run(db, task, "implement", lane=name, worktree=str(lane))
+            worker_id = ledger.register_worker(db, f"fixture-{name}")
+            ledger.acquire_lease(db, worker_id, run)
+            proc = running.enter_context(subprocess.Popen(
+                [sys.executable, "-c", service], cwd=lane, env={**os.environ, "FIXTURE_LANE": name},
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True))
+            running.callback(lambda p: p.kill() if p.poll() is None else None, proc)
+            processes[name] = proc
+        ports = {name: int(proc.stdout.readline()) for name, proc in processes.items()}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        bodies = {}
+        for name, port in ports.items():
+            with opener.open(f"http://127.0.0.1:{port}", timeout=5) as response:
+                bodies[name] = response.read().decode()
+        check("两真实服务同时存活、回环端口和 SQLite 内容相互隔离",
+              len(set(ports.values())) == 2 and bodies == {name: name for name in ports}
+              and all(proc.poll() is None for proc in processes.values()), str(ports))
+        command = [sys.executable, str(Path(maintenance.__file__).resolve()), "worktrees",
+                   str(ws / "state.db"), str(repo), "--apply", "--grace-hours", "0", "--json"]
+        with task_execution.exclusive(ws):
+            busy = subprocess.run(command, capture_output=True, timeout=15)
+        check("执行锁占用时，清理 CLI 保留全部目录", busy.returncode == 1 and orphan.is_dir())
+        report = maintenance.scan_worktrees(db, repo, apply=True, grace_hours=0)
+        check("清理仅移动孤儿，保留两 lane 和待对账目录",
+              {item["name"] for item in report["moved"]} == {"orphan"}
+              and {item["name"] for item in report["kept"]} == {"frontend", "backend", "recover"}
+              and not report["errors"])
+        check("两个 lane 读取同一基线且工作树数据仍隔离",
+              all(rd.revision(str(root / name), "HEAD") == git("rev-parse", "HEAD")
+                  and (root / name / "index.html").read_text() == name for name in ports))
+
+
+# ---------------- 控制台跨项目排队 ----------------
+
+def console_queue01(ws: Path):
+    """第二个项目等待图锁时保留 queued，获得锁后才记录 started_at。"""
+    import threading
+
+    import dashboard
+
+    runners = []
+    tasks = []
+    for project in ("first", "second"):
+        work = ws / project
+        work.mkdir()
+        with new_db(work) as db:
+            tasks.append(ledger.create_task(db, project))
+        runners.append(dashboard.ControlRunner(work, work / "state.db"))
+    holding = threading.Event()
+    release = threading.Event()
+    second_entered = threading.Event()
+
+    def hold(*args, **kwargs):
+        holding.set()
+        if not release.wait(10):
+            raise AssertionError("timed out waiting to release the first project")
+        return "first"
+
+    def second(*args, **kwargs):
+        second_entered.set()
+        return "second"
+
+    runners[0]._execute = hold
+    runners[1]._execute = second
+    runners[0].enqueue(tasks[0], "rerun", entry="test")
+    try:
+        assert holding.wait(10)
+        runners[1].enqueue(tasks[1], "rerun", entry="test")
+        check("全局图锁繁忙时第二项目仍显示排队、没有开始时间",
+              not second_entered.wait(.15) and runners[1].jobs()[0]["status"] == "queued"
+              and not runners[1].jobs()[0]["started_at"])
+    finally:
+        release.set()
+    assert second_entered.wait(10)
+    check("获得执行锁后登记开始时间", bool(runners[1].jobs()[0]["started_at"]))
 
 # ---------------- AC-08 错误重试分类 ----------------
 
@@ -2661,6 +2865,31 @@ def review_delivery01(ws: Path):
                 check("从部署重跑也不能越过延期的测试证据", not deploy["deploy_report"] and not staging.called
                       and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? AND gate_name='deploy_deferred_tests' AND passed=0",
                                  (light,)) == 1)
+
+            rows = [f"line {n:04}\n" for n in range(1, 1100)]
+            write(names["be"], "".join(rows))
+            git("add", "--", names["be"])
+            git("commit", "-qm", "large baseline")
+            long_base = git("rev-parse", "HEAD")
+            rows[899] = "verified change\n"
+            write(names["be"], "".join(rows))
+            git("add", "--", names["be"])
+            git("commit", "-qm", "edit around line 900")
+            long_head = git("rev-parse", "HEAD")
+            ranges = {}
+            data = {"base": long_base, "commits": [{"lane": "be", "commit": long_head}]}
+            long_lanes = [lane for lane in lanes if lane["name"] == "be"]
+            _, _, changed, _, snippets, gaps = rd.collect(str(repo), data, long_lanes, 2000, visible_head=ranges)
+            check("大文件保留变更附近的原始行号且证据齐全",
+                  not gaps and "900: verified change" in snippets and "line 0001" not in snippets)
+            row = {"ac": "AC-1", "status": "VERIFIED", "source": "HEAD", "ref": names["be"], "line": 900}
+            message = {"verdict": "PASS", "reason": "verified change", "criteria": [row], "findings": []}
+            args = (long_base, long_head, changed, {"AC-1": names["be"]}, {}, {}, long_lanes, gaps)
+            accepted, _ = rd.validate(str(repo), json.dumps(message), *args, visible_head=ranges)
+            row["line"] = 1
+            check("审查只能引用实际展示的 HEAD 片段",
+                  accepted["verdict"] == "PASS" and invalid(lambda: rd.validate(
+                      str(repo), json.dumps(message), *args, visible_head=ranges)))
         db.close()
 
 
@@ -3570,9 +3799,11 @@ CASES = {
     "AC-02h": ac02h,
     "AC-03": ac03, "AC-04": ac04,
     "AC-05": ac05, "AC-06": ac06, "AC-07": ac07, "AC-08": ac08, "AC-09": ac09,
+    "AC-10": contract01, "LANE-ISOLATION-01": parallel_isolation01,
     "AC-11": ac11, "AC-12": ac12, "AC-13": ac13, "AC-14": ac14,
     "ROLE-01": role01, "ROLE-02": role02,
     "CONSOLE-01": console01,
+    "CONSOLE-QUEUE-01": console_queue01,
     "APPROVAL-01": approval_flow01,
     "INTAKE-01": intake_publication01,
     "CONFIG-01": config01,
@@ -3596,9 +3827,6 @@ CASES = {
     "LANE-01": lane01,
     "CI-01": ci01,
     "KILL-01": kill01,
-}
-NOT_IN_P1 = {
-    "AC-10": "契约版本失效传播 → P3",
 }
 
 
@@ -3627,9 +3855,6 @@ def main(argv: list[str]) -> int:
         if detail and status != "PASS":
             line += f"  :: {detail}"
         print(line)
-    for case, why in NOT_IN_P1.items():
-        print(f"[SKIP] {case}  P1 范围外：{why}")
-
     total = len(RESULTS)
     n = {s: sum(1 for r in RESULTS if r[2] == s) for s in ("PASS", "FAIL", "GAP", "SKIP")}
     print(f"\n合计 {total} 条断言：PASS={n['PASS']} FAIL={n['FAIL']} GAP={n['GAP']} SKIP={n['SKIP']}")

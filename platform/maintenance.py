@@ -53,7 +53,7 @@ def _norm(project_dir: Path, value: str | Path) -> Path:
 
 # ---------------- AC-07 孤儿 worktree 清理 ----------------
 
-def _active_references(db: sqlite3.Connection, project_dir: Path, root: Path) -> tuple[set[Path], dict[str, str]]:
+def _active_references(db: sqlite3.Connection, project_dir: Path) -> tuple[set[Path], dict[str, str]]:
     """返回（必须保留的绝对路径集合，必须保留的目录名 → 依据）。"""
     keep_paths: set[Path] = set()
     keep_names: dict[str, str] = {}
@@ -64,6 +64,8 @@ def _active_references(db: sqlite3.Connection, project_dir: Path, root: Path) ->
     rows = db.execute(
         "SELECT r.task_id, r.lane, r.branch, r.worktree_path, r.status AS run_status, "
         "(r.lease_expires_at IS NOT NULL AND r.lease_expires_at > datetime('now')) AS lease_live, "
+        "EXISTS (SELECT 1 FROM operations o WHERE o.node_run_id=r.id AND o.task_id=r.task_id "
+        "AND o.status='pending' AND o.op_type IN ('git_commit_intent','deploy_staging_intent')) AS effect_pending, "
         "t.status AS task_status, l.status AS lane_status, l.branch AS lane_branch "
         "FROM node_runs r JOIN tasks t ON t.id=r.task_id "
         "LEFT JOIN lanes l ON l.task_id=r.task_id AND l.name=r.lane").fetchall()
@@ -73,6 +75,7 @@ def _active_references(db: sqlite3.Connection, project_dir: Path, root: Path) ->
             or r["run_status"] in ACTIVE_RUN_STATUSES
             or (r["lane_status"] in ACTIVE_LANE_STATUSES and r["task_status"] not in TERMINAL_TASK_STATUSES)
             or bool(r["lease_live"])
+            or bool(r["effect_pending"])
             or r["task_id"] in pending_tasks
         )
         if not active:
@@ -98,17 +101,24 @@ def scan_worktrees(db: sqlite3.Connection, project_dir: Path, *, root: Path | No
     root = Path(root) if root else project_dir / ".worktrees"
     if not root.is_absolute():
         root = project_dir / root
-    root = root.resolve()
+    requested = Path(os.path.abspath(root))
+    root = requested.resolve()
     report = {"root": str(root), "dry_run": not apply, "kept": [], "orphans": [],
               "moved": [], "purged": [], "errors": []}
+    if (apply or purge) and root != requested:
+        report["errors"].append("工作树根目录指向其他位置，请核对并指定实际路径")
+        return report
     if not root.is_dir():
         report["errors"].append(f"worktree 根目录不存在：{root}")
         return report
 
-    keep_paths, keep_names = _active_references(db, project_dir, root)
+    keep_paths, keep_names = _active_references(db, project_dir)
     now = datetime.now().timestamp()
     grace = max(grace_hours, 0) * 3600
     trash_root = root / ".trash"
+    if (apply or purge) and trash_root.resolve() != trash_root:
+        report["errors"].append("回收目录指向其他位置，请先核对")
+        return report
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
@@ -116,7 +126,9 @@ def scan_worktrees(db: sqlite3.Connection, project_dir: Path, *, root: Path | No
             continue
         resolved = entry.resolve()
         reason = None
-        if resolved in keep_paths:
+        if entry.is_symlink() or resolved != entry:
+            reason = "跳过链接目录"
+        elif any(path == resolved or resolved in path.parents for path in keep_paths):
             reason = "账本引用的活跃目录"
         elif entry.name in keep_names:
             reason = f"活跃 lane/分支同名（{keep_names[entry.name]}）"
@@ -136,6 +148,8 @@ def scan_worktrees(db: sqlite3.Connection, project_dir: Path, *, root: Path | No
         dest_dir = trash_root / stamp
         dest = dest_dir / entry.name
         try:
+            if dest_dir.resolve() != dest_dir:
+                raise OSError("回收批次目录指向其他位置")
             dest_dir.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 dest = dest_dir / f"{entry.name}-{datetime.now().strftime('%H%M%S%f')}"
@@ -147,7 +161,7 @@ def scan_worktrees(db: sqlite3.Connection, project_dir: Path, *, root: Path | No
     if purge and trash_root.is_dir():
         cutoff = now - max(trash_days, 0) * 86400
         for snap in sorted(trash_root.iterdir(), key=lambda p: p.name):
-            if not snap.is_dir() or snap.stat().st_mtime >= cutoff:
+            if snap.resolve() != snap or not snap.is_dir() or snap.stat().st_mtime >= cutoff:
                 continue
             try:
                 shutil.rmtree(snap)
@@ -468,13 +482,23 @@ def main(argv: list[str]) -> int:
     db = connect(args.db)
     try:
         if args.cmd == "worktrees":
-            report = scan_worktrees(db, Path(args.project_dir), root=Path(args.root) if args.root else None,
-                                    grace_hours=args.grace_hours, apply=args.apply,
-                                    purge=args.purge, trash_days=args.trash_days)
+            from contextlib import nullcontext
+            from task_execution import ExecutionError, exclusive
+
+            try:
+                with exclusive(Path(args.db).resolve().parent) if args.apply or args.purge else nullcontext():
+                    report = scan_worktrees(db, Path(args.project_dir), root=Path(args.root) if args.root else None,
+                                            grace_hours=args.grace_hours, apply=args.apply,
+                                            purge=args.purge, trash_days=args.trash_days)
+            except ExecutionError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
             if args.json:
                 print(json.dumps(report, ensure_ascii=False, indent=2))
             else:
                 _print_worktrees(report)
+            if report["errors"] and (args.apply or args.purge):
+                return 1
         elif args.cmd == "retry":
             report = collect_retry_items(db, task=args.task, max_retry=args.max_retry)
             if args.json:

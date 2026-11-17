@@ -49,6 +49,12 @@ def resume_interrupted(db_path: Path, task_id: str, app, cfg: dict, snap, entry:
         raise ExecutionError(f"任务挂起于 {pending}，请先审批")
     if snap.next != (entry,):
         raise ExecutionError(f"任务中断于 {pending}，请从该节点恢复")
+    if entry == "implement":
+        from external_recovery import recover_implementation
+        return recover_implementation(db_path, task_id, app, cfg, snap)
+    if entry == "deploy":
+        from external_recovery import recover_deployment
+        return recover_deployment(db_path, task_id, app, cfg, snap)
     if entry not in REPLAYABLE_NODES:
         raise ExecutionError(f"任务中断于 {entry}，需人工核查旧进程、产物和副作用")
 

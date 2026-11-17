@@ -13,8 +13,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
+from hashlib import sha256
 import json
 import sys
+from uuid import uuid4
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -88,7 +91,7 @@ def _report(app, cfg, task_id: str, *, register: bool = False) -> None:
         if node in task_approval.GATES:
             print(f"\n挂起于 {node}：请审阅产物后执行 "
                   f"`run_task.py {task_id} approve` 或 `reject`")
-        elif node in task_execution.REPLAYABLE_NODES:
+        elif node in task_execution.REPLAYABLE_NODES or node in ("implement", "deploy"):
             print(f"\n检查点停在 {node}：若执行已中断，请运行 "
                   f"`run_task.py {task_id} rerun --from {node}`")
         else:
@@ -160,11 +163,42 @@ def cmd_status(task_id: str) -> int:
     return 0
 
 
+def cmd_rollback(task_id: str) -> int:
+    from project_runs import rollback_river, staging_proof
+
+    if graph._project_config().get("project") != "river":
+        raise task_execution.ExecutionError("当前仅支持 River 隔离 staging 回退")
+    state = _app().get_state(_cfg(task_id)).values
+    g3 = state.get("g3_receipt") or {}
+    deploy = state.get("deploy_receipt") or {}
+    if not g3.get("head") or g3["head"] != deploy.get("head"):
+        raise task_execution.ExecutionError("目标任务缺少绑定交付提交的 G3 批准")
+    report = Path(state.get("deploy_report") or "")
+    with closing(ledger.connect(DB)) as db:
+        approval = db.execute(
+            "SELECT artifact_hash FROM approvals WHERE id=? AND task_id=? "
+            "AND gate_name='G3_staging' AND decision='approved'", (g3.get("approval"), task_id)
+        ).fetchone()
+        if (not approval or not report.is_file() or sha256(report.read_bytes()).hexdigest() != deploy.get("digest")
+                or ledger.artifact_digest([report]) != approval["artifact_hash"]):
+            raise task_execution.ExecutionError("G3 审批与部署报告摘要不符")
+        if not deploy.get("release"):
+            raise task_execution.ExecutionError("G3 记录缺少已批准的运行镜像凭证")
+        approved = staging_proof(report.read_text(encoding="utf-8"), "river", g3["head"])
+        if approved != deploy["release"]:
+            raise task_execution.ExecutionError("已批准报告中的镜像凭证与检查点不符")
+        result = rollback_river(approved)
+        ledger.record_operation(db, task_id, f"{task_id}:rollback_staging:{uuid4()}", "rollback_staging",
+                                g3["head"], result_ref=json.dumps(result))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     import os
     ap = argparse.ArgumentParser(description="通用任务执行器")
     ap.add_argument("task_id")
-    ap.add_argument("action", choices=("start", "approve", "reject", "rerun", "status"))
+    ap.add_argument("action", choices=("start", "approve", "reject", "rerun", "status", "rollback"))
     ap.add_argument("--by", default="operator", help="审批人（写 approvals.decided_by）")
     ap.add_argument("--reason", default="",
                     help="驳回理由（reject 必填，1~2000 字；回传给上游 Agent 判断是否修订）")
@@ -186,6 +220,8 @@ def main(argv: list[str]) -> int:
 def _write_action(args: argparse.Namespace) -> int:
     if args.action == "start":
         return cmd_start(args.task_id)
+    if args.action == "rollback":
+        return cmd_rollback(args.task_id)
     if args.action in ("approve", "reject"):
         decision = "approved" if args.action == "approve" else "rejected"
         if decision == "rejected":
