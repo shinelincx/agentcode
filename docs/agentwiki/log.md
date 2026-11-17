@@ -798,3 +798,7 @@
 ## [2026-11-17] plan | 面向 main 的发布与 CI 验收
 
 - 用户授权整理现有工作区、开 PR 并跟进 `checks` 和 `gitleaks`。发布范围和工作区保留约定见 [[wiki/项目概览#面向 main 的发布与 CI 验收（2026-11-17）]]。
+
+## [2026-11-17] verify | PR #1 首轮远端验收
+
+- `f62e1aa37265f5a2ad7929d21ecccf02823a3a04` 的 `pull_request` 和 `push` 验证全部通过 `checks` 与 `gitleaks`。发布范围与运行链接见 [[wiki/项目概览#面向 main 的发布与 CI 验收（2026-11-17）]]，已同步 [[index]]。
