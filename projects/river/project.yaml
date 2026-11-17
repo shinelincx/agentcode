@@ -40,6 +40,7 @@ gates:                       # 审批人 = 单人值守（P0a 表单 A 归档）
 
 review:                      # C 层自动审查（implement 之后、test 之前）
   codex: true                # true：追加 codex 审 diff（FAIL → gate_failed，消耗 1 次调用）
+  require_for_sensitive: true
 
 retro:                       # 复盘生成（G3 批准后；不影响交付终态）
   generate: false            # true：用 codex 生成 RETRO.md（失败仅留痕）

@@ -45,11 +45,12 @@ import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ledger
-from intake import IntakeError, create_task_from_payload
+import intake
+import task_approval
 
 PLATFORM = Path(__file__).resolve().parent
 CONSOLE_DIR = PLATFORM / "console"
@@ -69,15 +70,6 @@ CONTENT_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".ico": "image/x-icon",
-}
-# 需求参考图片：只允许 console 展示与读取这几种格式
-ATTACH_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
-
-# 挂起节点 → (审批闸门名, 产物 state keys)；与 run_task.GATES 保持一致
-GATE_KEYS = {
-    "review_g1": ("G1_requirements", ("requirements_doc",)),
-    "review_g2": ("G2_design", ("design_doc", "prototype_dir")),
-    "review_g3": ("G3_staging", ("deploy_report",)),
 }
 # 审批闸门 → 展示用产物类型（/api/artifact）
 GATE_KIND = {"G1_requirements": "requirements", "G2_design": "design",
@@ -295,7 +287,7 @@ def snapshot(db_path: Path, yaml_path: Path) -> dict:
             FROM approvals a ORDER BY a.id DESC LIMIT 12""")
         # 待审批单独取全量（最多 20），避免被后续已决记录挤出最近 12 条窗口
         pending_approvals = _rows(db, """
-            SELECT a.id, a.task_id, a.gate_name, a.decision, a.decided_by, a.reason, a.created_at, a.decided_at
+            SELECT a.id, a.task_id, a.gate_name, a.artifact_hash, a.decision, a.decided_by, a.reason, a.created_at, a.decided_at
             FROM approvals a WHERE a.decision='pending' ORDER BY a.id DESC LIMIT 20""")
         by_model = _rows(db, """
             SELECT COALESCE(model,'(unknown)') AS model, COALESCE(executor,'') AS executor,
@@ -384,10 +376,14 @@ def task_detail(db_path: Path, task_id: str) -> dict:
     finally:
         db.close()
     ws = db_path.parent
-    original = requirement_original(task_id, ws)
+    original = intake.read_original(ws, task_id)
+    attachments = [
+        {**meta, "url": "/api/attachment?" + urlencode({"task_id": task_id, "name": meta["rel"]})}
+        for _, meta in intake.reference_images(ws, task_id, original)
+    ]
     return {"task": task, "node_runs": runs, "gates": gates,
             "approvals": approvals, "artifacts": artifacts,
-            "original": original, "attachments": task_attachments(task_id, ws, original)}
+            "original": original, "attachments": attachments}
 
 
 def artifact_content(db_path: Path, task_id: str, kind: str) -> dict:
@@ -410,53 +406,6 @@ def artifact_content(db_path: Path, task_id: str, kind: str) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
     return {"kind": kind, "path": str(path), "size": len(text.encode("utf-8")),
             "content": text[:200_000]}
-
-
-def requirement_original(task_id: str, ws: Path) -> dict:
-    """原始需求（intake 结构化字段 + 附件元数据）；缺文件时返回空字典。"""
-    path = ws / task_id / "requirement.json"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def task_attachments(task_id: str, ws: Path, record: dict) -> list[dict]:
-    """附件清单：优先取 requirement.json，缺失时扫描 attachments/ 目录。"""
-    items = record.get("attachments") if isinstance(record.get("attachments"), list) else []
-    if items:
-        return [{"name": str(i.get("name") or ""), "rel": str(i.get("rel") or ""),
-                 "type": str(i.get("type") or ""), "size": int(i.get("size") or 0),
-                 "url": "/api/attachment?task_id=" + task_id + "&name="
-                        + str(i.get("rel") or "")} for i in items if isinstance(i, dict)]
-    base = ws / task_id / "attachments"
-    out = []
-    if base.is_dir():
-        for p in sorted(base.iterdir()):
-            if p.is_file() and p.suffix.lower() in ATTACH_TYPES:
-                out.append({"name": p.name, "rel": f"attachments/{p.name}",
-                            "type": ATTACH_TYPES[p.suffix.lower()], "size": p.stat().st_size,
-                            "url": f"/api/attachment?task_id={task_id}&name=attachments/{p.name}"})
-    return out
-
-
-def attachment_content(task_id: str, rel: str, ws: Path) -> dict:
-    """读取任务目录内的参考图片（限 png/jpeg，拒绝越界）。"""
-    if not task_id or not rel:
-        return {"error": "缺少 task_id 或 name"}
-    base = ws.resolve()
-    try:
-        path = (base / task_id / rel).resolve()
-        path.relative_to((base / task_id).resolve())
-    except (ValueError, OSError):
-        return {"error": "附件路径越界，拒绝读取"}
-    if not path.is_file() or path.suffix.lower() not in ATTACH_TYPES:
-        return {"error": "附件不存在"}
-    return {"path": str(path), "content": path.read_bytes(),
-            "type": ATTACH_TYPES[path.suffix.lower()]}
 
 
 def _recent_config_audit(path: Path, limit: int = 10) -> list[dict]:
@@ -487,38 +436,6 @@ def _now() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _requirement_text(ws: Path, db_path: Path, task_id: str) -> str:
-    path = ws / task_id / "requirement.json"
-    if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))["requirement"]
-    db = ro_connect(db_path)
-    try:
-        row = db.execute("SELECT requirement FROM tasks WHERE id=?", (task_id,)).fetchone()
-    finally:
-        db.close()
-    if row is None:
-        raise ControlError(f"任务不存在：{task_id}", 404)
-    return row["requirement"]
-
-
-def _ensure_approval(db_path: Path, task_id: str, gate: str,
-                     artifacts: list[str | None]) -> int:
-    """幂等登记待审批（复用 run_task 的哈希绑定语义；G2 同时绑定原型目录）。"""
-    db = ledger.connect(db_path)
-    try:
-        row = db.execute(
-            "SELECT id FROM approvals WHERE task_id=? AND gate_name=? AND decision='pending'",
-            (task_id, gate)).fetchone()
-        if row:
-            return int(row["id"])
-        paths = [a for a in artifacts if a and Path(a).exists()]
-        if not paths:
-            raise ControlError(f"{gate} 产物不存在：{artifacts!r}，无法登记审批")
-        return ledger.request_approval(db, task_id, gate, ledger.artifact_digest(paths))
-    finally:
-        db.close()
-
-
 # 图执行依赖 graph 模块的全局 RIVER_WS / 预算，跨项目的动作必须串行
 _GRAPH_LOCK = threading.Lock()
 
@@ -547,7 +464,8 @@ class ControlRunner:
             return [dict(j) for j in reversed(list(self._jobs.values()))][:20]
 
     def enqueue(self, task_id: str, action: str, *, decision: str = "",
-                by: str = "console", entry: str = "", reason: str = "") -> dict:
+                by: str = "console", entry: str = "", reason: str = "",
+                revision: str = "") -> dict:
         row = _task_row(self.db_path, task_id)
         if row is None:
             raise ControlError(f"任务不存在：{task_id}", 404)
@@ -569,6 +487,8 @@ class ControlRunner:
         # CLI 启动后挂起但尚未登记审批时状态仍为 running，这里放行，由图状态做最终判定
         if action == "decide" and row["status"] not in ("awaiting_human", "running"):
             raise ControlError(f"任务状态为 {row['status']}，当前没有待审批闸门", 409)
+        if action == "decide" and not revision:
+            revision = task_approval.pending_revision(self.db_path, task_id)
         if action == "rerun" and not entry:
             raise ControlError("缺少重跑起始节点 from", 400)
         with self._lock:
@@ -579,6 +499,7 @@ class ControlRunner:
             self._seq += 1
             job = {"job_id": f"job-{self._seq}", "task_id": task_id, "action": action,
                    "decision": decision, "by": by, "entry": entry, "reason": reason,
+                   "revision": revision,
                    "status": "queued",
                    "message": "", "queued_at": _now(), "started_at": "", "ended_at": ""}
             self._jobs[job["job_id"]] = job
@@ -593,15 +514,11 @@ class ControlRunner:
         if entry:
             if entry not in self._rerun_apps:
                 import graph as g
-                g.RIVER_WS = self.ws
-                g.USAGE_BUFFER = self.ws / "usage_buffer.jsonl"
                 self._rerun_apps[entry] = g.build_app(
                     g.make_checkpointer(self.ws / "graph.db"), entry=entry)
             return self._rerun_apps[entry]
         if self._app_obj is None:
             import graph as g
-            g.RIVER_WS = self.ws
-            g.USAGE_BUFFER = self.ws / "usage_buffer.jsonl"
             self._app_obj = g.build_app(g.make_checkpointer(self.ws / "graph.db"))
         return self._app_obj
 
@@ -615,11 +532,10 @@ class ControlRunner:
             with self._lock:
                 job.update(status="running", started_at=_now())
             try:
-                with _GRAPH_LOCK:
-                    message = self.execute(job["task_id"], job["action"],
-                                           decision=job["decision"], by=job["by"],
-                                           entry=job.get("entry", ""),
-                                           reason=job.get("reason", ""))
+                message = self.execute(job["task_id"], job["action"],
+                                       decision=job["decision"], by=job["by"],
+                                       entry=job["entry"], reason=job["reason"],
+                                       revision=job["revision"])
                 status = "done"
             except ControlError as exc:
                 message, status = str(exc), "failed"
@@ -629,42 +545,43 @@ class ControlRunner:
                 job.update(status=status, message=message, ended_at=_now())
 
     def execute(self, task_id: str, action: str, *, decision: str = "",
-                by: str = "console", entry: str = "", reason: str = "") -> str:
+                by: str = "console", entry: str = "", reason: str = "",
+                revision: str = "") -> str:
         """同步执行一次动作并返回摘要（测试可直接调用）。"""
-        from langgraph.types import Command
+        import graph as g
+        with _GRAPH_LOCK:
+            g.bind_workspace(self.ws)
+            g.refresh_runtime_config()
+            return self._execute(task_id, action, decision=decision, by=by, entry=entry,
+                                 reason=reason, revision=revision)
+
+    def _execute(self, task_id: str, action: str, *, decision: str, by: str,
+                 entry: str, reason: str, revision: str) -> str:
         import graph as g
         if action == "rerun" and entry not in g.RERUN_ENTRY_NODES:
             raise ControlError(
                 f"不支持从节点重跑：{entry!r}（可用：{', '.join(g.RERUN_ENTRY_NODES)}）", 400)
         app = self._get_app(entry if action == "rerun" else None)
-        g.refresh_runtime_config()  # 配置页保存后无需重启进程即可生效
         cfg = {"configurable": {"thread_id": task_id}}
         snap = app.get_state(cfg)
         if action == "start":
             if snap.values:
                 raise ControlError(
                     f"图状态已存在（挂起于 {list(snap.next) or 'END'}），无需重复启动", 409)
-            app.invoke({"task_id": task_id,
-                        "requirement": _requirement_text(self.ws, self.db_path, task_id)}, cfg)
+            requirement = intake.requirement_text(self.db_path, self.ws, task_id)
+            if requirement is None:
+                raise ControlError(f"任务不存在：{task_id}", 404)
+            app.invoke({"task_id": task_id, "requirement": requirement}, cfg)
         elif action == "decide":
             if decision not in ("approved", "rejected"):
                 raise ControlError("decision 须为 approved 或 rejected", 400)
             if decision == "rejected" and not (reason or "").strip():
                 raise ControlError("驳回必须填写理由（reason，1~2000 字）", 400)
-            if not snap.next:
-                raise ControlError("当前没有挂起的闸门", 409)
-            node = snap.next[0]
-            if node not in GATE_KEYS:
-                raise ControlError(f"挂起节点 {node} 不是人审闸门，无法审批", 409)
-            gate, keys = GATE_KEYS[node]
-            approval_id = _ensure_approval(self.db_path, task_id, gate,
-                                           [snap.values.get(k) for k in keys])
-            db = ledger.connect(self.db_path)
             try:
-                ledger.decide_approval(db, approval_id, decision, by, reason)
-            finally:
-                db.close()
-            app.invoke(Command(resume=decision), cfg)
+                task_approval.resume(self.db_path, task_id, app, cfg, snap,
+                                     decision, by, reason, revision)
+            except task_approval.ApprovalError as exc:
+                raise ControlError(str(exc)) from exc
         elif action == "rerun":
             if not snap.values:
                 raise ControlError("任务尚无图状态，无法重跑（先 start）", 409)
@@ -681,13 +598,12 @@ class ControlRunner:
         pending = list(snap.next)
         if pending:
             node = pending[0]
-            if node in GATE_KEYS:
-                gate, keys = GATE_KEYS[node]
+            if node in task_approval.GATES:
+                gate, _ = task_approval.GATES[node]
                 try:
-                    _ensure_approval(self.db_path, task_id, gate,
-                                     [snap.values.get(k) for k in keys])
+                    task_approval.register(self.db_path, task_id, snap)
                     parts.append(f"挂起于 {gate}，待审批")
-                except ControlError as exc:
+                except task_approval.ApprovalError as exc:
                     parts.append(f"挂起于 {gate}，审批登记失败：{exc}")
             else:
                 parts.append(f"挂起于 {node}")
@@ -831,11 +747,17 @@ class Handler(BaseHTTPRequestHandler):
             task_id = (query.get("task_id") or [""])[0].strip()
             name = (query.get("name") or [""])[0].strip()
             _, db_path, _ = target
-            data = attachment_content(task_id, name, db_path.parent)
-            if "error" in data:
-                self._json(404, {"error": data["error"]})
-            else:
-                self._send(200, data["content"], data["type"])
+            image = (intake.reference_image_path(db_path.parent, task_id, name)
+                     if _task_row(db_path, task_id) is not None else None)
+            if image is None:
+                self._json(404, {"error": "附件不存在"})
+                return
+            try:
+                content = image.read_bytes()
+            except OSError:
+                self._json(404, {"error": "附件无法读取"})
+                return
+            self._send(200, content, intake.IMAGE_MIME[image.suffix.lower()])
         elif path == "/intake" and not self.intake_enabled:
             self._json(404, {"error": "not found"})
         elif path.startswith("/api/"):
@@ -921,8 +843,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import graph
                 with _GRAPH_LOCK:
-                    graph.RIVER_WS = yaml_path.parent
-                    graph.USAGE_BUFFER = yaml_path.parent / "usage_buffer.jsonl"
+                    graph.bind_workspace(yaml_path.parent)
                     graph.refresh_runtime_config()
                 refreshed = True
             except Exception as exc:
@@ -953,8 +874,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             proj, db_path, _ = target
             try:
-                result = create_task_from_payload(db_path, db_path.parent, payload)
-            except IntakeError as exc:
+                result = intake.create_task_from_payload(db_path, db_path.parent, payload)
+            except intake.IntakeError as exc:
                 self._json(400, {"error": str(exc)})
                 return
             except Exception as exc:  # 落库异常不得假装成功
@@ -1012,7 +933,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 job = runner.enqueue(task_id, action, decision=decision, by=by,
-                                     entry=entry, reason=reason)
+                                     entry=entry, reason=reason,
+                                     revision=str(payload.get("revision") or "").strip())
             except ControlError as exc:
                 self._json(exc.code, {"error": str(exc)})
                 return

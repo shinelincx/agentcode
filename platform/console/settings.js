@@ -14,13 +14,15 @@ const AGENT_MODELS = [
 ];
 
 const SettingsView = {
-  cfg: null, meta: {}, editable: false, file: '', loadingFor: '',
+  cfg: null, meta: {}, editable: false, file: '', loadVersion: 0,
 
-  async load(project) {
-    this.loadingFor = project;
+  async load() {
+    const context = viewContext();
+    const version = ++this.loadVersion;
+    this.editable = false;
     $('view').innerHTML = '<div class="empty">加载配置…</div>';
     const { ok, data } = await getJSON('/api/config');
-    if (this.loadingFor !== state.project) return;  // 已切到其他项目
+    if (!sameView(context) || version !== this.loadVersion) return;
     if (!ok) {
       $('view').innerHTML = `<div class="empty">${esc(data.error || '配置读取失败')}</div>`;
       return;
@@ -184,15 +186,17 @@ const SettingsView = {
 
   async submit() {
     if (!this.editable) return;
+    const context = viewContext();
     const updates = this.collect();
     const keys = Object.keys(updates);
     if (!keys.length) { this.msg('没有检测到变更'); return; }
     this.msg('保存中…');
     const { ok, data } = await postJSON('/api/config', { updates, by: 'console' });
+    if (!sameView(context)) return;
     if (!ok) { this.msg('保存失败：' + (data.error || ''), 'jbad'); return; }
     this.msg(`已保存 ${data.changed.length} 项：${data.changed.join(', ')}`
       + (data.runtime_refreshed ? '（运行时已刷新）' : '（运行时刷新失败，需重启）'), 'jok');
-    await this.load(state.project);
+    await this.load();
   },
 };
 

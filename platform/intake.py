@@ -12,14 +12,18 @@
     <ws>/<task_id>/requirement.json = 结构化全量（原始字段 + 附件元数据 + task_id + created_at）
     <ws>/<task_id>/attachments/     = 参考图片正本（PNG/JPEG，需求节点以 `codex -i` 送入模型）
 
-失败语义：校验不通过抛 IntakeError，绝不写入半成品任务（与前序 C-005/C-007 同族防线）。
+文件完整写入后才提交任务行，校验或写入失败时不会留下可启动的任务。
 """
 from __future__ import annotations
 
 import base64
 import json
 import re
+import shutil
 import sys
+import tempfile
+import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +40,7 @@ MAX_CONTENT = 8000
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg"}
+IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 IMAGE_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
 
 
@@ -119,7 +124,7 @@ def validate_payload(payload: dict) -> dict:
 
     content = _text(payload, "content", required=True, limit=MAX_CONTENT, label="内容")
 
-    priority = (payload.get("priority") or "normal").strip()
+    priority = _text(payload, "priority", required=False, limit=6, label="优先级") or "normal"
     if priority not in ledger.PRIORITIES:
         raise IntakeError(f"优先级须为 {ledger.PRIORITIES} 之一，收到 {priority!r}")
 
@@ -138,30 +143,86 @@ def normalize(payload: dict) -> str:
 
 
 def create_task_from_payload(db_path: str | Path, ws: str | Path, payload: dict) -> dict:
-    """校验 → 建任务 → 落附件 → 写 requirement.json。返回 {task_id, requirement, path, priority}。"""
+    """完整落盘后提交可见任务。"""
     clean = validate_payload(payload)
     images = clean.pop("images", [])
     text = normalize({**clean, "images": images})
-    db = ledger.init_db(db_path)  # 幂等建表/迁移，避免半成品库
-    try:
-        task_id = ledger.create_task(db, text, clean["priority"])
-    finally:
-        db.close()
-
-    task_dir = Path(ws) / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    attachments = []
-    for img in images:
-        dest = Path(ws) / task_id / img["rel"]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(img["data"])
-        attachments.append({k: img[k] for k in ("name", "type", "size", "rel")})
+    task_id = str(uuid.uuid4())
+    workspace = Path(ws)
+    task_dir = workspace / task_id
+    attachments = [{k: img[k] for k in ("name", "type", "size", "rel")} for img in images]
     record = {**clean, "attachments": attachments, "task_id": task_id,
               "requirement": text, "created_at": datetime.now(timezone.utc).isoformat()}
     path = task_dir / "requirement.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    workspace.mkdir(parents=True, exist_ok=True)
+    with closing(ledger.init_db(db_path)) as db:
+        with tempfile.TemporaryDirectory(prefix=".intake-", dir=workspace) as staging:
+            staged = Path(staging)
+            if images:
+                (staged / "attachments").mkdir()
+            for img in images:
+                (staged / img["rel"]).write_bytes(img["data"])
+            (staged / path.name).write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            staged.rename(task_dir)
+            try:
+                ledger.create_task(db, text, clean["priority"], task_id=task_id)
+            except Exception:
+                shutil.rmtree(task_dir)
+                raise
     return {"task_id": task_id, "requirement": text, "path": str(path),
             "priority": clean["priority"], "attachments": attachments}
+
+
+def read_original(ws: Path, task_id: str) -> dict:
+    """保留原始记录的历史结构，缺失或损坏时由调用方回退到账本文本。"""
+    try:
+        data = json.loads((ws / task_id / "requirement.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def requirement_text(db_path: Path, ws: Path, task_id: str) -> str | None:
+    with closing(ledger.connect(db_path)) as db:
+        row = db.execute("SELECT requirement FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    text = read_original(ws, task_id).get("requirement")
+    return text if isinstance(text, str) and text.strip() else row["requirement"]
+
+
+def reference_image_path(ws: Path, task_id: str, rel: str) -> Path | None:
+    if not task_id or not rel or Path(task_id).name != task_id:
+        return None
+    try:
+        base = ws.resolve()
+        task_dir = (base / task_id).resolve()
+        if task_dir != base / task_id:
+            return None
+        path = (task_dir / rel).resolve()
+        path.relative_to(task_dir)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return path if path.suffix.lower() in IMAGE_MIME and path.is_file() else None
+
+
+def reference_images(ws: Path, task_id: str, original: dict) -> list[tuple[Path, dict]]:
+    """解析录入记录，旧任务没有附件清单时读取 attachments 目录。"""
+    items = original.get("attachments")
+    if not isinstance(items, list) or not items:
+        directory = ws / task_id / "attachments"
+        items = [{"rel": f"attachments/{path.name}"} for path in sorted(directory.iterdir())] \
+            if directory.is_dir() else []
+    images = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("rel"), str):
+            path = reference_image_path(ws, task_id, item["rel"])
+            if path is not None:
+                images.append((path, {"name": str(item.get("name") or path.name),
+                                      "rel": item["rel"], "type": IMAGE_MIME[path.suffix.lower()],
+                                      "size": path.stat().st_size}))
+    return images
 
 
 def _cli(argv: list[str]) -> int:
@@ -178,7 +239,7 @@ def _cli(argv: list[str]) -> int:
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
         result = create_task_from_payload(db_path, ws, payload)
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"读取/解析失败：{exc}", file=sys.stderr)
+        print(f"读取、解析或保存失败：{exc}", file=sys.stderr)
         return 2
     except IntakeError as exc:
         print(f"校验失败：{exc}", file=sys.stderr)

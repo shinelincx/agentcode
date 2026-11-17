@@ -72,7 +72,7 @@ class LeaseHeldError(LeaseError):
     """租约被其他存活 Worker 持有，暂不可接管。"""
 
 
-def artifact_digest(paths) -> str:
+def artifact_digest(paths, *, contents: dict[Path, bytes] | None = None) -> str:
     """产物摘要（AC-09 哈希绑定，支持目录）。
 
     文件：文件名 + 内容；目录：按相对路径排序后逐文件累加。
@@ -86,12 +86,17 @@ def artifact_digest(paths) -> str:
         if p.is_dir():
             files = sorted((q for q in p.rglob("*") if q.is_file()),
                            key=lambda q: q.relative_to(p).as_posix())
-            for q in files:
-                digest.update(q.relative_to(p).as_posix().encode("utf-8") + b"\0")
-                digest.update(q.read_bytes())
+            entries = [(q, q.relative_to(p).as_posix()) for q in files]
         elif p.is_file():
-            digest.update(p.name.encode("utf-8") + b"\0")
-            digest.update(p.read_bytes())
+            entries = [(p, p.name)]
+        else:
+            continue
+        for file, name in entries:
+            data = file.read_bytes()
+            digest.update(name.encode("utf-8") + b"\0")
+            digest.update(data)
+            if contents is not None:
+                contents[file] = data
     return digest.hexdigest()
 
 
@@ -132,6 +137,8 @@ def _migrate(db: sqlite3.Connection):
     ap_cols = {row["name"] for row in db.execute("PRAGMA table_info(approvals)")}
     if "reason" not in ap_cols:
         db.execute("ALTER TABLE approvals ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+    if "checkpoint_id" not in ap_cols:
+        db.execute("ALTER TABLE approvals ADD COLUMN checkpoint_id TEXT")
     # B2：retro_queue 升级为 outbox（至少一次投递 + 退避 + 死信）
     retro_sql = db.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='retro_queue'").fetchone()
@@ -259,10 +266,11 @@ def lane_merge_plan(db: sqlite3.Connection, task_id: str) -> list[dict]:
 PRIORITIES = ("high", "normal", "low")
 
 
-def create_task(db: sqlite3.Connection, requirement: str, priority: str = "normal") -> str:
+def create_task(db: sqlite3.Connection, requirement: str, priority: str = "normal", *,
+                task_id: str | None = None) -> str:
     if priority not in PRIORITIES:
         raise ValueError(f"priority 须为 {PRIORITIES} 之一，收到 {priority!r}")
-    task_id = str(uuid.uuid4())
+    task_id = task_id or str(uuid.uuid4())
     db.execute(
         "INSERT INTO tasks (id, requirement, priority) VALUES (?, ?, ?)",
         (task_id, requirement, priority),
@@ -478,26 +486,28 @@ def record_operation(db: sqlite3.Connection, task_id: str, operation_key: str,
 # ---------- 审批（哈希绑定）----------
 
 def request_approval(db: sqlite3.Connection, task_id: str, gate_name: str,
-                     artifact_hash: str) -> int:
+                     artifact_hash: str, *, checkpoint_id: str | None = None,
+                     commit: bool = True) -> int:
     cur = db.execute(
-        "INSERT INTO approvals (task_id, gate_name, artifact_hash) VALUES (?,?,?)",
-        (task_id, gate_name, artifact_hash),
+        "INSERT INTO approvals (task_id, gate_name, artifact_hash, checkpoint_id) VALUES (?,?,?,?)",
+        (task_id, gate_name, artifact_hash, checkpoint_id),
     )
     db.execute("UPDATE tasks SET status='awaiting_human', updated_at=datetime('now') WHERE id=?", (task_id,))
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
 def decide_approval(db: sqlite3.Connection, approval_id: int, decision: str,
                     decided_by: str, reason: str = "") -> bool:
     """登记审批结论。decision ∈ approved|rejected；驳回时 reason 必填（由调用方校验）。"""
-    db.execute(
+    cur = db.execute(
         "UPDATE approvals SET decision=?, decided_by=?, decided_at=datetime('now'), reason=? "
         "WHERE id=? AND decision='pending'",
         (decision, decided_by, (reason or "").strip(), approval_id),
     )
     db.commit()
-    return db.total_changes > 0
+    return cur.rowcount == 1
 
 
 def latest_rejection_reason(db: sqlite3.Connection, task_id: str, gate_name: str) -> str:

@@ -34,6 +34,13 @@ jobs:
       - name: Platform smoke
         run: python platform/smoke_test.py
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Console project switching
+        run: node --test platform/console_project_test.js
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

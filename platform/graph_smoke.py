@@ -7,7 +7,7 @@
   4) 从 checkpoint 恢复 → 仍停在 G2（状态未丢）
   5) resume(approved) → 走完 implement → retro → END
 """
-import re
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -41,49 +41,42 @@ def main():
         # 因此把 codex、门禁、git 全部打桩，避免真实执行与仓库路径依赖。
         # A2 起 requirements/design 也走 codex：桩须按 prompt 返回合法 Markdown 文档。
         def _stub_codex(prompt, workdir, **kw):
-            if "Write REQUIREMENTS.md" in prompt:
-                out = ("# REQUIREMENTS · task stub\n\n## 需求\n- stub requirement: add a sample field\n\n"
+            schema = kw.get("output_schema") or {}
+            if "decision" in schema.get("properties", {}):
+                out = json.dumps({"decision": "KEEP", "reason": "桩保留原稿", "edits": []})
+            elif "You are the Requirements Agent" in prompt:
+                title = next(line for line in prompt.splitlines() if line.startswith("# REQUIREMENTS · task "))
+                out = (f"{title}\n\n## 需求\n- stub requirement: add a sample field\n\n"
                        "## 验收标准\n- AC-1: stub acceptance criterion\n- AC-2: stub second criterion\n\n"
                        "## 非目标\n- nothing else\n")
-            elif "Write DESIGN.md" in prompt:
-                out = ("# DESIGN · task stub\n\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
+            elif "You are the Design Agent" in prompt:
+                title = next(line for line in prompt.splitlines() if line.startswith("# DESIGN · task "))
+                out = (f"{title}\n\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
                        "| apps/api/src/index.ts | be |\n| apps/web/src/app.tsx | fe |\n\n"
-                       "## 实现策略\nserial be → fe\n\n"
+                       "## 实现策略\n- 执行顺序：be → fe\n- 前端使用后端返回值。\n\n"
                        "## 验收映射\n- AC-1 → apps/api/src/index.ts\n- AC-2 → apps/web/src/app.tsx\n")
             elif "You are the Prototype Agent" in prompt:
-                target = Path(re.search(r"Prototype directory:\s*(.+)", prompt).group(1).strip())
-                target.mkdir(parents=True, exist_ok=True)
-                (target / "index.html").write_text(
+                html = (
                     "<!DOCTYPE html>\n<html lang=\"zh\">\n<head><meta charset=\"utf-8\">"
                     "<title>stub prototype</title></head>\n<body>\n<h1>stub prototype</h1>\n"
                     "<p>静态占位原型：用于验证原型节点产物校验与 G2 审批哈希绑定。</p>\n"
                     "<p>该页面不连接任何后端接口，仅覆盖最小长度与 HTML 骨架校验。</p>\n"
-                    "<button>示例操作</button>\n</body>\n</html>\n", encoding="utf-8")
-                (target / "PROTOTYPE.md").write_text(
+                    "<button id=\"example-action\">示例操作</button>\n</body>\n</html>\n")
+                note = (
                     "# PROTOTYPE · stub\n\n## 原型说明\n首页提示区域的静态占位原型，"
                     "包含标题与操作按钮，用于验证产物校验流程。\n\n"
-                    "## 验收映射\n- AC-1 → h1 标题\n- AC-2 → button 操作\n\n"
-                    "## 局限\n静态页面，无真实接口与状态流转。\n", encoding="utf-8")
-                out = "prototype stub written"
+                    "## 验收映射\n- AC-1 → 原型演示 | #example-action | 打开页面 | 显示示例操作\n"
+                    "- AC-2 → 后续验证 | 验收测试运行现有服务入口\n\n"
+                    "## 局限\n静态页面，无真实接口与状态流转。\n")
+                out = json.dumps({"index_html": html, "prototype_md": note})
             else:
                 out = "stub implement report"
-            return w.WorkerResult(0, out + "\ntokens used\n  10\n", 10, "stub")
+            return w.WorkerResult(0, out + "\ntokens used\n  10\n", 10, "stub", final_message=out)
         w.run_codex = _stub_codex
         w.run_gate = lambda command, workdir, timeout=900: (True, "stub gate passed")
 
-        _branch = {"name": ""}
-
-        def _fake_git(workdir, *args):
-            # checkout -B 记录 lane 分支：scope 硬校验要求 fe 只改 web、be 只改 api
-            if len(args) >= 3 and args[0] == "checkout" and args[1] == "-B":
-                _branch["name"] = args[2]
-                return (0, "")
-            if args[:2] == ("status", "--porcelain"):  # C-007 空交付检测：桩须模拟有改动
-                if _branch["name"].endswith("-fe"):
-                    return (0, "M  apps/web/src/app.tsx\n")
-                return (0, "M  apps/api/src/index.ts\n")
-            return (0, "")
-        w.git = _fake_git
+        from ac_regression import _stub_lane_git
+        w.git = _stub_lane_git()
         db = ledger.connect(ws / "state.db")
         # 角色流程桩配置：测试门禁 + staging 部署（命令由下方 run_gate 桩统一通过）
         (ws / "project.yaml").write_text(
@@ -129,7 +122,8 @@ def main():
         check("state survives restart", snap2.next == ("review_g2",), str(snap2.next))
 
         # 5) G2 批准 → 跑完实现 + 测试 + 部署，挂起在 G3 staging 验收
-        app2.invoke(Command(resume="approved"), cfg)
+        from task_approval import resume
+        resume(ws / "state.db", task_id, app2, cfg, snap2, "approved", "smoke fixture")
         snap3 = app2.get_state(cfg)
         check("interrupted at G3", snap3.next == ("review_g3",), str(snap3.next))
         check("测试角色已执行并落报告",

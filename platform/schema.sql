@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   task_id       TEXT NOT NULL REFERENCES tasks(id),
   gate_name     TEXT NOT NULL,                          -- G1_requirements|G2_design|G3_staging
   artifact_hash TEXT NOT NULL,                          -- 被审产物哈希（批准后变更即失效）
+  checkpoint_id TEXT,                                   -- 对应本轮图挂起，允许恢复同一结论
   decision      TEXT NOT NULL DEFAULT 'pending'
                 CHECK (decision IN ('pending','approved','rejected')),
   reason        TEXT NOT NULL DEFAULT '',                -- 驳回/批准理由（驳回必填，回传给上游 Agent）

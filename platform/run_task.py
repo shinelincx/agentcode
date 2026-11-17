@@ -19,17 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import graph
+import intake
 import ledger
-from langgraph.types import Command
+import task_approval
 
 WS = graph.RIVER_WS
 DB = WS / "state.db"
-# 挂起节点 → (审批闸门名, 产物 state keys)；G2 同时绑定设计文档与原型目录
-GATES = {
-    "review_g1": ("G1_requirements", ("requirements_doc",)),
-    "review_g2": ("G2_design", ("design_doc", "prototype_dir")),
-    "review_g3": ("G3_staging", ("deploy_report",)),
-}
 
 
 def _select_project(name: str) -> None:
@@ -53,17 +48,10 @@ def _cfg(task_id: str) -> dict:
 
 
 def _requirement(task_id: str) -> str:
-    path = WS / task_id / "requirement.json"
-    if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))["requirement"]
-    db = ledger.connect(DB)
-    try:
-        row = db.execute("SELECT requirement FROM tasks WHERE id=?", (task_id,)).fetchone()
-    finally:
-        db.close()
-    if row is None:
+    requirement = intake.requirement_text(DB, WS, task_id)
+    if requirement is None:
         raise SystemExit(f"任务不存在：{task_id}（先用看板 /intake 或 intake.py 创建）")
-    return row["requirement"]
+    return requirement
 
 
 def _task_row(task_id: str):
@@ -75,24 +63,13 @@ def _task_row(task_id: str):
         db.close()
 
 
-def _ensure_approval(task_id: str, gate: str, artifacts: list[str]) -> int:
-    db = ledger.connect(DB)
-    try:
-        row = db.execute(
-            "SELECT id FROM approvals WHERE task_id=? AND gate_name=? AND decision='pending'",
-            (task_id, gate)).fetchone()
-        if row:
-            return int(row["id"])
-        paths = [a for a in artifacts if a and Path(a).exists()]
-        if not paths:
-            raise SystemExit(f"{gate} 产物不存在：{artifacts!r}，无法登记审批")
-        return ledger.request_approval(db, task_id, gate, ledger.artifact_digest(paths))
-    finally:
-        db.close()
-
-
-def _report(app, cfg, task_id: str) -> None:
+def _report(app, cfg, task_id: str, *, register: bool = False) -> None:
     snap = app.get_state(cfg)
+    if register and snap.next and snap.next[0] in task_approval.GATES:
+        try:
+            task_approval.register(DB, task_id, snap)
+        except task_approval.ApprovalError as exc:
+            raise SystemExit(str(exc)) from exc
     row = _task_row(task_id)
     out = {
         "task_id": task_id,
@@ -134,27 +111,17 @@ def cmd_start(task_id: str) -> int:
     snap = app.get_state(cfg)
     if not snap.values:
         app.invoke({"task_id": task_id, "requirement": _requirement(task_id)}, cfg)
-    _report(app, cfg, task_id)
+    _report(app, cfg, task_id, register=True)
     return 0
 
 
 def cmd_decide(task_id: str, decision: str, by: str, reason: str = "") -> int:
     app, cfg = _app(), _cfg(task_id)
-    snap = app.get_state(cfg)
-    if not snap.next:
-        raise SystemExit("当前没有挂起的闸门（先 start，或用 status 查看状态）")
-    node = snap.next[0]
-    if node not in GATES:
-        raise SystemExit(f"挂起节点 {node!r} 不是人审闸门，无法用 approve/reject 处理")
-    gate, keys = GATES[node]
-    approval_id = _ensure_approval(task_id, gate, [snap.values.get(k) for k in keys])
-    db = ledger.connect(DB)
     try:
-        ledger.decide_approval(db, approval_id, decision, by, reason)
-    finally:
-        db.close()
-    app.invoke(Command(resume=decision), cfg)
-    _report(app, cfg, task_id)
+        task_approval.resume(DB, task_id, app, cfg, app.get_state(cfg), decision, by, reason)
+    except task_approval.ApprovalError as exc:
+        raise SystemExit(str(exc)) from exc
+    _report(app, cfg, task_id, register=True)
     return 0
 
 
@@ -173,7 +140,7 @@ def cmd_rerun(task_id: str, entry: str) -> int:
         raise SystemExit(f"任务挂起于 {snap.next[0]}，请先 approve/reject，而不是重跑")
     graph.reset_task_for_rerun(task_id, entry)
     app.invoke(graph.rerun_payload(task_id, entry), cfg)
-    _report(app, cfg, task_id)
+    _report(app, cfg, task_id, register=True)
     return 0
 
 

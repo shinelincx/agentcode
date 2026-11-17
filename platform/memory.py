@@ -14,14 +14,17 @@ B2 投递语义（retro_queue 升级为 outbox）：
 用法：
     python memory.py adopt <db_path> <project_dir> [--dry-run]
     python memory.py deliver <db_path> <project_dir> [--force] [--dry-run] [--max-attempts N]
-    python memory.py pool <db_path>
+    python memory.py pool <db_path> [candidate_id]
+    python memory.py review <db_path> <project_dir> <id> <approve|reject> --by NAME
 """
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import re
 import sqlite3
 import sys
+import unicodedata
 from pathlib import Path
 
 L0_TYPES = {"convention", "pitfall"}
@@ -42,8 +45,112 @@ def classify(c: dict) -> str:
     return "L1"
 
 
+def _key(project, candidate):
+    def normalized(text):
+        return " ".join(unicodedata.normalize("NFKC", text).casefold().split()).rstrip("。.!?")
+    parts = [project, candidate["scope"], candidate["type"], normalized(candidate["text"]),
+             normalized(candidate["applies_when"])]
+    return "C-R-" + sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()[:24]
+
+
+def enqueue(db, bundle, run, digest, candidates):
+    """Record candidates for review under one write lock, deduplicated across tasks."""
+    from retro_evidence import check_candidate
+
+    rows = []
+    for item in candidates:
+        check_candidate(item, bundle)
+        cid = _key(bundle["project"], item)
+        rows.append({"id":cid, "policy":"retro-evidence", "review_state":"pending", "scope":"project",
+                     "risk":"low", "type":item["type"], "text":item["text"], "candidate":item,
+                     "project":bundle["project"], "source":bundle["task"], "head":bundle["head"],
+                     "run":run, "digest":digest, "evidence":", ".join(item["refs"])})
+    inserted = []
+    if rows:
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in rows:
+                exists = db.execute(
+                    "SELECT 1 FROM retro_queue WHERE json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.id')=?",
+                    (row["id"],)).fetchone()
+                if not exists:
+                    db.execute("INSERT INTO retro_queue(task_id,payload) VALUES (?,?)",
+                               (bundle["task"], json.dumps(row, ensure_ascii=False)))
+                    inserted.append(row["id"])
+    return inserted
+
+
+def _validate_source(db, project_dir, task_id, candidate):
+    import yaml
+    from retro_evidence import check_candidate
+
+    if (candidate.get("policy") != "retro-evidence" or candidate.get("source") != task_id
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id)
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+", candidate.get("run", ""))):
+        raise ValueError("来源缺少已验证的复盘记录")
+    config = project_dir / "project.yaml"
+    project = ((yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("project")
+               if config.is_file() else None) or project_dir.name
+    path = project_dir / task_id / "docs" / f"RETRO-evidence-{candidate['run']}.json"
+    raw = path.read_bytes()
+    if sha256(raw).hexdigest() != candidate.get("digest"):
+        raise ValueError("复盘证据摘要不匹配")
+    bundle = json.loads(raw)
+    if not isinstance(bundle, dict):
+        raise ValueError("复盘证据格式无效")
+    item = candidate["candidate"]
+    if (bundle.get("task") != task_id or bundle.get("project") != project or candidate.get("project") != project
+            or bundle.get("head") != candidate.get("head") or candidate["id"] != _key(project, item)
+            or item not in bundle.get("candidates", [])
+            or candidate["text"] != item["text"] or candidate["type"] != item["type"]):
+        raise ValueError("候选与项目、交付版本或证据不一致")
+    row = db.execute("SELECT 1 FROM node_runs n JOIN gate_results g ON g.node_run_id=n.id "
+                     "WHERE n.task_id=? AND n.id=? AND n.node_name='retro' AND n.status='done' "
+                     "AND g.gate_name='retro_doc' AND g.passed=1 AND g.output=?",
+                     (task_id, candidate["run"], candidate["digest"])).fetchone()
+    if not row:
+        raise ValueError("来源复盘尚未完成或证据未核验")
+    check_candidate(item, bundle)
+
+
+def review_candidate(db, project_dir, cid, decision, actor):
+    if decision not in ("approve", "reject") or not actor.strip():
+        raise ValueError("须指定 approve/reject 和人工审核人")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT id, task_id, payload FROM retro_queue WHERE status='pending' "
+            "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.id')=?",
+            (cid,)).fetchone()
+        if not row:
+            raise ValueError("未找到待审核候选")
+        payload = json.loads(row["payload"])
+        if payload.get("review_state") not in (None, "pending"):
+            raise ValueError("候选已有审核决定")
+        if decision == "approve":
+            _validate_source(db, project_dir, row["task_id"], payload)
+        payload["review_state"] = "approved" if decision == "approve" else "rejected"
+        payload["reviewed_by"] = actor.strip()
+        payload["reviewed_at"] = db.execute("SELECT datetime('now')").fetchone()[0]
+        db.execute("UPDATE retro_queue SET payload=?,status=? WHERE id=?",
+                   (json.dumps(payload, ensure_ascii=False), "pending" if decision == "approve" else "dropped", row["id"]))
+    return {"id": cid, "review_state": payload["review_state"]}
+
+
+def _ready(db, project_dir, task_id, candidate):
+    if candidate.get("review_state") != "approved" or not candidate.get("reviewed_by"):
+        return False
+    try:
+        _validate_source(db, project_dir, task_id, candidate)
+    except (ValueError, OSError, TypeError, KeyError):
+        return False
+    return True
+
+
 def render_entry(c: dict) -> str:
-    return (f"- [{c['id']}] {c['text']}\n"
+    item = c.get("candidate")
+    text = f"{item['text']}（{item['scope']} · {item['applies_when']}）" if item else c["text"]
+    return (f"- [{c['id']}] {text}\n"
             f"  来源: {c.get('source', '?')} | 证据: {c.get('evidence', '?')} | "
             f"回滚: 删除本行（一键回滚，V2.2 §10.3 安全网）\n")
 
@@ -105,9 +212,14 @@ def deliver(db: sqlite3.Connection, project_dir: Path, *, dry_run: bool = False,
         "SELECT id, task_id, payload, attempts, next_attempt_at "
         "FROM retro_queue WHERE status='pending' ORDER BY id").fetchall()
     for r in rows:
-        c = {"queue_id": r["id"], "task_id": r["task_id"], **json.loads(r["payload"])}
-        if classify(c) != "L0":
-            stats["deferred"].append(c["id"])
+        try:
+            c = json.loads(r["payload"])
+        except (ValueError, TypeError):
+            c = {}
+        if not isinstance(c, dict):
+            c = {}
+        if classify(c) != "L0" or not _ready(db, project_dir, r["task_id"], c):
+            stats["deferred"].append(c.get("id", str(r["id"])))
             continue
         if not force and r["next_attempt_at"] and r["next_attempt_at"] > now:
             stats["not_due"].append(c["id"])
@@ -123,7 +235,7 @@ def deliver(db: sqlite3.Connection, project_dir: Path, *, dry_run: bool = False,
             continue
         attempts = 0
         try:
-            cur = db.execute("SELECT status, attempts, next_attempt_at FROM retro_queue WHERE id=?",
+            cur = db.execute("SELECT status, attempts, next_attempt_at, payload FROM retro_queue WHERE id=?",
                              (r["id"],)).fetchone()
             if cur is None or cur["status"] != "pending" or (
                     not force and cur["next_attempt_at"] and cur["next_attempt_at"] > now):
@@ -137,6 +249,12 @@ def deliver(db: sqlite3.Connection, project_dir: Path, *, dry_run: bool = False,
                 db.rollback()
                 stats["claimed_by_other"].append(c["id"])
                 continue
+            latest = json.loads(cur["payload"])
+            if classify(latest) != "L0" or not _ready(db, project_dir, r["task_id"], latest):
+                db.rollback()
+                stats["deferred"].append(c["id"])
+                continue
+            c = latest
             attempts = int(cur["attempts"]) + 1
             if entry_exists(agents_md, c["id"]):  # 崩溃恢复：文件已写、未标 done
                 db.execute("UPDATE retro_queue SET status='done', delivered_at=datetime('now'), "
@@ -185,6 +303,18 @@ def adopt(db: sqlite3.Connection, project_dir: Path, *, dry_run: bool = False,
 
 
 def _cli(argv: list[str]) -> int:
+    if len(argv) == 7 and argv[0] == "review" and argv[5] == "--by":
+        from contextlib import closing
+        import ledger
+
+        with closing(ledger.init_db(argv[1])) as db:
+            try:
+                result = review_candidate(db, Path(argv[2]), argv[3], argv[4], argv[6])
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if len(argv) >= 3 and argv[0] in ("adopt", "deliver"):
         cmd, db_path, project_dir = argv[0], argv[1], Path(argv[2])
         db = sqlite3.connect(db_path)
@@ -210,11 +340,24 @@ def _cli(argv: list[str]) -> int:
         for r in db.execute(
                 "SELECT id, task_id, payload, status, attempts, next_attempt_at, last_error "
                 "FROM retro_queue ORDER BY id"):
-            c = json.loads(r["payload"])
+            try:
+                c = json.loads(r["payload"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(c, dict):
+                continue
+            if len(argv) == 3:
+                if c.get("id") == argv[2]:
+                    print(json.dumps({"queue_status":r["status"], **c}, ensure_ascii=False, indent=2))
+                    return 0
+                continue
             extra = "" if r["status"] == "done" else (
                 f" attempts={r['attempts']} next={r['next_attempt_at'] or '-'}"
                 + (f" err={r['last_error'][:60]}" if r["last_error"] else ""))
-            print(f"{r['id']} [{r['status']}] {c.get('id', '?')} {c.get('text', '')[:50]}{extra}")
+            print(f"{r['id']} [{r['status']}] {c.get('id', '?')} {c.get('text', '')[:50]}"
+                  f" · review={c.get('review_state', 'unverified')}{extra}")
+        if len(argv) == 3:
+            return 1
         return 0
     print(__doc__)
     return 1

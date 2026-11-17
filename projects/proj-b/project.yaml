@@ -44,6 +44,7 @@ gates:
 
 review:
   codex: true
+  require_for_sensitive: true
 
 retro:
   generate: false
@@ -53,12 +54,14 @@ tech_stack:                  # pdca-erp：frontend(Vue3+Vite) / backend(Spring M
   web: frontend
   api: backend
   gate_commands:
-    # 注意：mvn 不在本机 PATH，后端暂不入门禁；前端门禁零依赖可跑。
-    # 后端接入时补 Maven（含 DB/Redis 集成环境）并在此追加命令。
     typecheck: npm --prefix frontend run type-check
     unit: node --test frontend/scripts/*.test.mjs
     build: npm --prefix frontend run build
     verify_all: npm --prefix frontend run type-check && node --test frontend/scripts/*.test.mjs
+  lane_gate_commands:
+    be:
+      typecheck: mvn -B -ntp -f backend/pom.xml -pl pcba-erp-admin -am -DskipTests compile
+      unit: mvn -B -ntp -f backend/pom.xml -pl pcba-erp-admin -am test
 
 test:
   gates: [typecheck, unit]

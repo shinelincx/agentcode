@@ -159,5 +159,11 @@ def render(name: str, **params: Any) -> str:
 
     # 4. 渲染
     tmpl_text = tmpl_path.read_text(encoding="utf-8")
+    if name in ("requirements-gen", "design-gen"):
+        shared, modes = tmpl_text.split("\n<!-- draft -->\n", 1)
+        draft, revision_and_context = modes.split("\n<!-- revision -->\n", 1)
+        revision, context = revision_and_context.split("\n<!-- context -->\n", 1)
+        contract = revision if params["previous_document"] not in (None, "", "无") else draft
+        tmpl_text = shared + "\n" + contract + context
     # 保留 $$ 作为字面 $ 的 escape（Template.substitute 的标准行为）
     return Template(tmpl_text).substitute(**params)
