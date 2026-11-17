@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -1520,7 +1521,15 @@ def implement_node(state: DeliveryState) -> dict:
                     or any(row[1] != " " for row in checked.split("\0") if len(row) >= 3)):
                 return {"implement_summary": _fail_lane(db, task_id, lane, "final_patch_changed",
                         "最终门禁后补丁发生变化，停止提交", run, worker_id, epoch)}
-        # 副作用：commit（幂等键去重）；返回值必须检查——空提交/失败不得登记 done（C-007）
+        intent_key = f"{task_id}:{lane['node']}:git_intent:{run}"
+        try:
+            ledger.record_operation(db, task_id, intent_key, "git_commit_intent", tree.strip(),
+                                    node_run_id=run, status="pending", worker_id=worker_id, lease_epoch=epoch,
+                                    result_ref=json.dumps({"branch": lane["branch"], "parent": head.strip(),
+                                                           "repaired": repaired}))
+        except ledger.StaleLeaseError:
+            return {"implement_summary": ""}
+        # 副作用发生前已登记核对过的 Git 树和父提交。
         crc, cout = w.git(repo, "commit", "-m", lane.get("commit_msg", f"feat({lane['name']}): {task_id[:8]}"))
         if crc != 0:
             ledger.set_lane_status(db, task_id, lane["name"], "failed")
@@ -1536,6 +1545,8 @@ def implement_node(state: DeliveryState) -> dict:
                 db, task_id, f"{task_id}:{lane['node']}:git_commit:{run}",
                 "git_commit", commit, node_run_id=run,
                 worker_id=worker_id, lease_epoch=epoch)
+            with db:
+                db.execute("UPDATE operations SET status='done' WHERE operation_key=?", (intent_key,))
         except ValueError as exc:
             return {"implement_summary": _fail_lane(db, task_id, lane, "delivery_snapshot", str(exc),
                                                        run, worker_id, epoch)}
@@ -2135,6 +2146,17 @@ def deploy_node(state: DeliveryState) -> dict:
     if not ok:
         ledger.record_gate_result(db, task_id, "deploy_delivery", False, "部署工作区与交付版本不一致", node_run_id=run)
         steps.append(("delivery", "", False, "部署工作区与交付版本不一致"))
+    import external_recovery
+    project = external_recovery.staging_project(config)
+    release = {}
+    intent_key = f"{task_id}:deploy_staging_intent:{attempt}"
+    if ok and head and project:
+        try:
+            ledger.record_operation(db, task_id, intent_key, "deploy_staging_intent", head,
+                                    node_run_id=run, status="pending", worker_id=worker_id, lease_epoch=epoch,
+                                    result_ref=external_recovery.staging_config_digest(config))
+        except ledger.StaleLeaseError:
+            return {"deploy_report": "", "deploy_skipped": False}
     for index, command in enumerate(commands, start=1):
         if not ok:
             break
@@ -2147,6 +2169,12 @@ def deploy_node(state: DeliveryState) -> dict:
                 break
             command = command.replace("{delivery_head}", head)
         passed, out = w.run_gate(command, repo, timeout=timeout)
+        if passed and project:
+            from project_runs import staging_proof
+            try:
+                release = staging_proof(out, project, head)
+            except ValueError as exc:
+                passed, out = False, str(exc)
         ledger.record_gate_result(db, task_id, f"deploy_step_{index}", passed, out, node_run_id=run)
         steps.append((f"step{index}", command, passed, out))
         if not passed:
@@ -2171,14 +2199,18 @@ def deploy_node(state: DeliveryState) -> dict:
             ledger.record_gate_result(db, task_id, "deploy_delivery", False, "部署期间交付版本发生变化", node_run_id=run)
             steps.append(("delivery", "", False, "部署期间交付版本发生变化"))
 
+    release_note = f"## 运行制品\n\n```text\nSTAGING PROOF {json.dumps(release)}\n```" if ok and release else ""
     report_path.write_text(_render_deploy_report(
-        task_id, "PASS · staging 部署与检查通过" if ok else "FAIL · staging 部署/检查失败", steps),
+        task_id, "PASS · staging 部署与检查通过" if ok else "FAIL · staging 部署/检查失败", steps, release_note),
         encoding="utf-8")
     if ok:
         try:  # B1 栅栏：epoch 已失效则部署副作用不登记、任务状态不落 done
             ledger.record_operation(db, task_id, f"{task_id}:deploy_staging:{attempt}",
-                                    "deploy_staging", "staging", node_run_id=run,
+                                    "deploy_staging", head if project and head else "staging", node_run_id=run,
                                     worker_id=worker_id, lease_epoch=epoch)
+            if project:
+                with db:
+                    db.execute("UPDATE operations SET status='done' WHERE operation_key=?", (intent_key,))
         except ledger.StaleLeaseError as exc:
             print(f"[lease] stale operation rejected: {exc}")
             return {"deploy_report": "", "deploy_skipped": False}
@@ -2186,7 +2218,7 @@ def deploy_node(state: DeliveryState) -> dict:
             return {"deploy_report": "", "deploy_skipped": False}
         ledger.set_task_status(db, task_id, "running", node="deploy")
         return {"deploy_report": str(report_path), "deploy_skipped": False, "g3_receipt": {},
-                "deploy_receipt": retro_evidence.receipt(report_path, head, run, skipped=False)}
+                "deploy_receipt": retro_evidence.receipt(report_path, head, run, skipped=False, release=release)}
     if _close(db, run, "failed", worker_id, epoch):
         ledger.set_task_status(db, task_id, "gate_failed", node="deploy")
     return {"deploy_report": "", "deploy_skipped": False}

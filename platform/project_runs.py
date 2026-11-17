@@ -1,5 +1,6 @@
 """Project test and staging commands. Business Git is read on the host."""
 from contextlib import contextmanager
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,8 @@ import yaml
 
 WSL = ["wsl.exe", "-d", os.environ.get("AGENTCODE_WSL_DISTRO", "Debian"), "--"] if os.name == "nt" else []
 OPENER = build_opener(ProxyHandler({}))
+STAGING = {"river": (("api", "web"), 18082, "/api/stats"),
+           "proj-b": (("backend", "frontend"), 18083, "/api/actuator/health/readiness")}
 
 
 def run(command, **kwargs):
@@ -49,14 +52,13 @@ def linux_path(path):
 @contextmanager
 def running_wsl():
     # Keep Docker available while the Windows child (Maven or HTTP smoke) is active.
-    process = subprocess.Popen([*WSL, "sleep", "1800"], stdout=subprocess.DEVNULL,
+    process = subprocess.Popen([*WSL, "head", "-c", "1"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL) if WSL else None
     try:
         yield
     finally:
         if process:
-            process.terminate()
-            process.wait(timeout=10)
+            process.communicate(b"\n", timeout=10)
 
 
 def wait_until(probe, seconds=60):
@@ -115,6 +117,10 @@ def proj_b_integration():
           f"integration={sum(counts[name]['tests'] for name in names)} skipped=0")
 
 
+def stage_cache():
+    return Path(os.environ.get("AGENTCODE_STAGE_CACHE", str(Path.home() / ".agentcode" / "staging"))).resolve()
+
+
 def pinned_source(project, expected):
     repo = Path.cwd()
     if output(["git", "status", "--porcelain"]):
@@ -122,7 +128,7 @@ def pinned_source(project, expected):
     head = output(["git", "rev-parse", "HEAD"])
     if not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", head) or head != expected:
         raise ValueError("Staging requires the expected Git commit at HEAD")
-    cache = Path(os.environ.get("AGENTCODE_STAGE_CACHE", str(Path.home() / ".agentcode" / "staging"))).resolve()
+    cache = stage_cache()
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     tree = Path(tempfile.mkdtemp(prefix=f"{project}-{head[:12]}-", dir=cache))
     archive = tree / "source.tar"
@@ -144,6 +150,8 @@ def river_services(src, port):
     services["web"]["ports"] = [f"127.0.0.1:{port}:80"]
     # The archived init.sql is mounted by a path visible to the Docker daemon.
     services["postgres"]["volumes"][0] = linux_path(src / "infra/postgres/init.sql") + ":/docker-entrypoint-initdb.d/001-init.sql:ro"
+    services["postgres"]["volumes"].append("river-stage-data:/var/lib/postgresql/data")
+    content.setdefault("volumes", {})["river-stage-data"] = {}
     services["postgres"]["image"] = image(services["postgres"]["image"])
     for name in ("api", "web"):
         services[name]["build"]["context"] = linux_path(src)
@@ -212,9 +220,8 @@ def http(base, path, data=None):
 
 
 def staging(project, expected):
-    profiles = {"river": (river_services, 18082, "/api/stats"), "proj-b": (proj_b_services, 18083,
-                                                                         "/api/actuator/health/readiness")}
-    prepare, port, ready = profiles[project]
+    _, port, ready = STAGING[project]
+    prepare = {"river": river_services, "proj-b": proj_b_services}[project]
     head, src = pinned_source(project, expected)
     with running_wsl():
         config, names = prepare(src, port)
@@ -222,18 +229,23 @@ def staging(project, expected):
         for name in names:
             service = config["services"][name]
             service["image"] = f"{stack}-{name}:{head}"
-            service["build"].setdefault("labels", {})["org.opencontainers.image.revision"] = head
+            service["build"].setdefault("labels", {}).update({
+                "org.opencontainers.image.revision": head,
+                "org.agentcode.staging.archive": src.parent.name,
+            })
         manifest = src.parent / "compose.json"
         with os.fdopen(os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
             json.dump(config, stream)
         compose = docker("compose", "-p", stack, "-f", linux_path(manifest))
         run([*compose, "up", "-d", "--build", "--wait", "--wait-timeout", "180"])
+        image_ids = {}
         for name in names:
             container = output([*compose, "ps", "-q", name])
             image_id = output(docker("inspect", "--format", "{{.Image}}", container))
             inspected, = json.loads(output(docker("image", "inspect", image_id)))
             if inspected["Config"]["Labels"].get("org.opencontainers.image.revision") != head:
                 raise RuntimeError(f"{name} is not running the archived commit")
+            image_ids[name] = image_id
             print(f"STAGING {name} image={image_id} head={head}", flush=True)
         base = f"http://127.0.0.1:{port}"
         readiness = wait_until(lambda: json.loads(http(base, ready)))
@@ -245,7 +257,89 @@ def staging(project, expected):
             if (readiness.get("status") != "UP" or 'id="app"' not in http(base, "/login")
                     or logged_in.get("code") != 200 or logged_in.get("data", {}).get("username") != "admin"):
                 raise RuntimeError("proj-b readiness or normalized login failed")
+        verified = src.parent / "stage-verified.json"
+        verified.write_text(json.dumps({"head": head, "images": image_ids,
+                                       "manifest_sha256": sha256(manifest.read_bytes()).hexdigest()}), encoding="utf-8")
         print(f"STAGING PASS head={head} endpoint={base} manifest={manifest}")
+        print("STAGING PROOF " + json.dumps({"head": head, "images": image_ids, "archive": src.parent.name}))
+
+
+def current_release(project, expected=None):
+    """Read the running pinned images, release proof and HTTP readiness without redeploying."""
+    names, port, ready = STAGING[project]
+    revisions, archives, image_ids = set(), set(), {}
+    for name in names:
+        container = f"agentcode-{project}-staging-{name}-1"
+        image_id = output(docker("inspect", "--format", "{{.State.Running}} {{.Image}}", container)).split()
+        if len(image_id) != 2 or image_id[0] != "true":
+            raise RuntimeError(f"{container} is not running")
+        image_ids[name] = image_id[1]
+        item, = json.loads(output(docker("image", "inspect", image_id[1])))
+        labels = item["Config"]["Labels"]
+        revisions.add(labels["org.opencontainers.image.revision"])
+        archives.add(labels["org.agentcode.staging.archive"])
+    revision, = revisions
+    archive, = archives
+    if ((expected and revision != expected) or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", revision)
+            or not re.fullmatch(rf"{project}-{revision[:12]}-[a-z0-9_]+", archive)):
+        raise RuntimeError("Running revision does not match the expected staging release")
+    directory = stage_cache() / archive
+    manifest, evidence = verified_manifest(directory, revision)
+    if evidence["images"] != image_ids:
+        raise RuntimeError("The running images differ from the verified release")
+    health = json.loads(http(f"http://127.0.0.1:{port}", ready))
+    healthy = {"version", "uptimeSeconds"} <= health.keys() if project == "river" else health.get("status") == "UP"
+    if not healthy:
+        raise RuntimeError("Running release is not ready")
+    return {"head": revision, "images": image_ids, "archive": archive, "manifest": str(manifest)}
+
+
+def verified_manifest(directory, head):
+    manifest = directory / "compose.json"
+    record = json.loads((directory / "stage-verified.json").read_text(encoding="utf-8"))
+    if record["head"] != head or record["manifest_sha256"] != sha256(manifest.read_bytes()).hexdigest():
+        raise RuntimeError("Saved deployment verification does not match the manifest")
+    return manifest, record
+
+
+def staging_proof(output_text, project, head):
+    entries = [line.removeprefix("STAGING PROOF ") for line in output_text.splitlines()
+               if line.startswith("STAGING PROOF ")]
+    if len(entries) != 1:
+        raise ValueError("部署输出缺少唯一的镜像凭证")
+    proof = json.loads(entries[0])
+    if (proof.get("head") != head or not re.fullmatch(rf"{project}-{head[:12]}-[a-z0-9_]+", proof.get("archive", ""))
+            or set(proof.get("images", {})) != set(STAGING[project][0])
+            or not all(re.fullmatch(r"sha256:[a-f0-9]{64}", image_id) for image_id in proof["images"].values())):
+        raise ValueError("部署镜像凭证与当前交付不符")
+    return proof
+
+
+def rollback_river(approved):
+    """Restore the already-approved River images, with an unchanged database schema."""
+    with running_wsl():
+        observed = current_release("river")
+        head = approved["head"]
+        if all(observed[key] == approved[key] for key in ("head", "images", "archive")):
+            return observed
+        active = Path(observed["manifest"])
+        target, evidence = verified_manifest(stage_cache() / approved["archive"], head)
+        if evidence["images"] != approved["images"]:
+            raise RuntimeError("Saved images differ from the G3 approval")
+        def schema(manifest):
+            return (manifest.parent / "source/infra/postgres/init.sql").read_bytes()
+        if schema(active) != schema(target):
+            raise RuntimeError("Database schema differs; rollback requires a migration decision")
+        services = json.loads(target.read_text(encoding="utf-8"))["services"]
+        for name, expected in evidence["images"].items():
+            if output(docker("image", "inspect", "--format", "{{.Id}}", services[name]["image"])) != expected:
+                raise RuntimeError("An approved target image is not available under the saved tag")
+        run(docker("compose", "-p", "agentcode-river-staging", "-f", linux_path(target),
+                   "up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "180"))
+        restored = wait_until(lambda: current_release("river", head))
+        if restored["images"] != approved["images"]:
+            raise RuntimeError("Rollback images do not match the G3 approval")
+        return restored
 
 
 if __name__ == "__main__":
@@ -256,5 +350,9 @@ if __name__ == "__main__":
         maven("-DskipTests", "compile")
     elif action == "staging":
         staging(sys.argv[2], sys.argv[3])
+    elif action == "check-staging":
+        with running_wsl():
+            observed = current_release(sys.argv[2], sys.argv[3])
+            print("STAGING PROOF " + json.dumps({key: observed[key] for key in ("head", "archive", "images")}))
     else:
         raise SystemExit("Supported commands: proj-b-integration, proj-b-compile, staging river|proj-b <commit>")
