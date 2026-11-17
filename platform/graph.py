@@ -1968,7 +1968,7 @@ def test_node(state: DeliveryState) -> dict:
         if _close(db, run, "failed", worker_id, epoch):
             ledger.set_task_status(db, task_id, "gate_failed", node="test")
         return {"test_report": "", "test_receipt": {}}
-    if not gates and "contracts" not in config:
+    if not gates:
         ledger.record_gate_result(db, task_id, "test_config", False,
                                   "未配置可用测试门禁（test.gates / tech_stack.gate_commands）",
                                   node_run_id=run)
@@ -2004,7 +2004,7 @@ def test_node(state: DeliveryState) -> dict:
             break
 
     contract = {}
-    if "contracts" in config and all(ok for _, _, ok, _ in results):
+    if "contracts" in config and gates and all(ok for _, _, ok, _ in results):
         import contract_delivery
         import subprocess
         import tarfile
@@ -2022,7 +2022,7 @@ def test_node(state: DeliveryState) -> dict:
         "ORDER BY id", (task_id,))]
     report_path.write_text(_render_test_report(task_id, results, commits), encoding="utf-8")
 
-    all_ok = bool(gates or contract) and all(ok for _, _, ok, _ in results)
+    all_ok = bool(gates) and all(ok for _, _, ok, _ in results)
     if all_ok:
         if not _close(db, run, "done", worker_id, epoch):
             return {"test_report": ""}

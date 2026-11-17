@@ -101,9 +101,13 @@ def scan_worktrees(db: sqlite3.Connection, project_dir: Path, *, root: Path | No
     root = Path(root) if root else project_dir / ".worktrees"
     if not root.is_absolute():
         root = project_dir / root
-    root = root.resolve()
+    requested = Path(os.path.abspath(root))
+    root = requested.resolve()
     report = {"root": str(root), "dry_run": not apply, "kept": [], "orphans": [],
               "moved": [], "purged": [], "errors": []}
+    if (apply or purge) and root != requested:
+        report["errors"].append("工作树根目录指向其他位置，请核对并指定实际路径")
+        return report
     if not root.is_dir():
         report["errors"].append(f"worktree 根目录不存在：{root}")
         return report
@@ -493,6 +497,8 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(report, ensure_ascii=False, indent=2))
             else:
                 _print_worktrees(report)
+            if report["errors"] and (args.apply or args.purge):
+                return 1
         elif args.cmd == "retry":
             report = collect_retry_items(db, task=args.task, max_retry=args.max_retry)
             if args.json:

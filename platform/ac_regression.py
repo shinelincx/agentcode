@@ -22,6 +22,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ledger
@@ -990,12 +991,12 @@ def ac07(ws: Path):
 
 # ---------------- P3 契约失效与并发隔离 ----------------
 
+@patch.object(_worker_mod, "git", _REAL_GIT)
 def contract01(ws: Path):
     """实际 Git 提交和两个登记消费者探针沿独立测试和部署入口。"""
     import graph as g
     import review_delivery as rd
     import worker
-    from unittest.mock import patch
 
     db = new_db(ws)
     repo = ws / "repo"
@@ -1066,6 +1067,7 @@ def contract01(ws: Path):
               and rebuilt["test_receipt"]["run"] != original["test_receipt"]["run"])
 
 
+@patch.object(_worker_mod, "git", _REAL_GIT)
 def parallel_isolation01(ws: Path):
     """并行运行两个带数据的真实回环服务，并演练 worktree 清理。"""
     from contextlib import ExitStack
@@ -1145,6 +1147,50 @@ def parallel_isolation01(ws: Path):
               all(rd.revision(str(root / name), "HEAD") == git("rev-parse", "HEAD")
                   and (root / name / "index.html").read_text() == name for name in ports))
 
+
+# ---------------- 控制台跨项目排队 ----------------
+
+def console_queue01(ws: Path):
+    """第二个项目等待图锁时保留 queued，获得锁后才记录 started_at。"""
+    import threading
+
+    import dashboard
+
+    runners = []
+    tasks = []
+    for project in ("first", "second"):
+        work = ws / project
+        work.mkdir()
+        with new_db(work) as db:
+            tasks.append(ledger.create_task(db, project))
+        runners.append(dashboard.ControlRunner(work, work / "state.db"))
+    holding = threading.Event()
+    release = threading.Event()
+    second_entered = threading.Event()
+
+    def hold(*args, **kwargs):
+        holding.set()
+        if not release.wait(10):
+            raise AssertionError("timed out waiting to release the first project")
+        return "first"
+
+    def second(*args, **kwargs):
+        second_entered.set()
+        return "second"
+
+    runners[0]._execute = hold
+    runners[1]._execute = second
+    runners[0].enqueue(tasks[0], "rerun", entry="test")
+    try:
+        assert holding.wait(10)
+        runners[1].enqueue(tasks[1], "rerun", entry="test")
+        check("全局图锁繁忙时第二项目仍显示排队、没有开始时间",
+              not second_entered.wait(.15) and runners[1].jobs()[0]["status"] == "queued"
+              and not runners[1].jobs()[0]["started_at"])
+    finally:
+        release.set()
+    assert second_entered.wait(10)
+    check("获得执行锁后登记开始时间", bool(runners[1].jobs()[0]["started_at"]))
 
 # ---------------- AC-08 错误重试分类 ----------------
 
@@ -3757,6 +3803,7 @@ CASES = {
     "AC-11": ac11, "AC-12": ac12, "AC-13": ac13, "AC-14": ac14,
     "ROLE-01": role01, "ROLE-02": role02,
     "CONSOLE-01": console01,
+    "CONSOLE-QUEUE-01": console_queue01,
     "APPROVAL-01": approval_flow01,
     "INTAKE-01": intake_publication01,
     "CONFIG-01": config01,

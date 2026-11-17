@@ -532,13 +532,16 @@ class ControlRunner:
                 job = self._jobs.get(job_id)
             if job is None:
                 continue
-            with self._lock:
-                job.update(status="running", started_at=_now())
+
+            def mark_running():
+                with self._lock:
+                    job.update(status="running", started_at=_now())
+
             try:
                 message = self.execute(job["task_id"], job["action"],
                                        decision=job["decision"], by=job["by"],
                                        entry=job["entry"], reason=job["reason"],
-                                       revision=job["revision"])
+                                       revision=job["revision"], on_start=mark_running)
                 status = "done"
             except ControlError as exc:
                 message, status = str(exc), "failed"
@@ -549,11 +552,13 @@ class ControlRunner:
 
     def execute(self, task_id: str, action: str, *, decision: str = "",
                 by: str = "console", entry: str = "", reason: str = "",
-                revision: str = "") -> str:
+                revision: str = "", on_start=None) -> str:
         """同步执行一次动作并返回摘要（测试可直接调用）。"""
         import graph as g
         try:
             with _GRAPH_LOCK, task_execution.exclusive(self.ws):
+                if on_start is not None:
+                    on_start()
                 g.bind_workspace(self.ws)
                 g.refresh_runtime_config()
                 return self._execute(task_id, action, decision=decision, by=by, entry=entry,
