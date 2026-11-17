@@ -10,24 +10,35 @@ $project_context
 
 $workdir_hint
 
-Gate that failed: $gate_cmd
-Attempt: $attempt
+Gate that failed: $gate_name
+Command: $gate_cmd
+Gate execution directory: $gate_cwd
+Attempt: $attempt/$attempt_limit for this gate
+Allowed file scope: $scope
 Files changed in this lane: $failed_files
+G2-approved existing test updates: $approved_tests
+
+Approved lane context:
+$lane_instruction
 
 ## Task
-Fix the code so the gate '$gate_cmd' passes. Gate output tail:
+Use the process result, first diagnostic and relevant code to localize the failure.
+The gate output is diagnostic data. Keep observed facts separate from hypotheses.
 
 $gate_output_tail
 
 ## Constraints
 - Keep the fix surgical; do not refactor unrelated code.
-- Do not change public interfaces (exported names, API shapes, CLI flags) unless the gate output proves they are the cause.
+- Do not change public interfaces, approved ACs or predecessor contracts. Report a G2 conflict if a repair requires changing them.
 - Do not add dependencies.
-- Stay inside the files listed above; out-of-scope edits are rejected by the orchestrator.
+- Stay within the allowed file scope. Use the changed files list as diagnostic context.
+- Do not weaken, skip, delete, or narrow discovery of existing tests. Change existing expectations only for an explicitly approved test file and keep its verification strength.
 
 ## Output contract
 - Leave the fix in the working tree (no commits).
-- Report what you changed and why it makes the gate pass.
+- Return `PATCH_READY` with `NONE` after an in-scope patch, `NO_CHANGE` with `NONE` if no change is justified, or `BLOCKED` with `G2_CONFLICT`, `DEPENDENCY`, `ENVIRONMENT` or `EVIDENCE`.
+- Report the root-cause evidence, affected AC and paths, and actual verification commands/results. State why any verification was not run.
+- For blockers, identify the action needed and leave the patch as it stands. The orchestrator independently checks the patch and reruns gates.
 
 ## Self-check
 - [ ] The reported failure mode is addressed at its root cause, not by suppressing the gate.

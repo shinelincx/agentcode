@@ -15,18 +15,26 @@ Lane instruction:
 $lane_instruction
 
 ## Task
-On the current branch ($branch), implement the lane instruction above.
-Files you own (scope): $scope
+On the current branch ($branch), implement the primary ACs in the approved lane instruction.
+Files you own (repository-relative scope): $scope
+Use other lanes' mappings and predecessor interfaces as coordination context. If an approved
+dependency is missing or a change needs another lane's files, report the blocked AC and path.
 
 ## Constraints
 - Touch only files matching the lane scope; out-of-scope edits are rejected by the orchestrator before commit.
 - Keep the diff minimal; do not change existing field semantics unless the task explicitly requires it.
 - Do not add dependencies or change public interfaces unless the lane instruction explicitly requires it.
+- Do not weaken, skip, or delete existing tests or assertions to pass a gate.
+- Preserve existing test execution and assertions. Add focused regression checks within scope;
+  change existing test expectations only with an explicit G2-approved justification.
 - Follow the project pitfalls and conventions listed in Context (sandbox limits, gate command mapping).
 
 ## Output contract
 - Leave all changes in the working tree on branch $branch (no commits, no branch operations).
 - Report every file you modified and a one-line summary of each change.
+- For each primary AC report its changed files, the actual command or reproducible check, and the
+  observed result. Mark checks you did not run and checks that require the combined lanes.
+- The orchestrator owns independent gates, staging, and commits.
 
 ## Self-check
 - [ ] Every changed file is inside the lane scope.

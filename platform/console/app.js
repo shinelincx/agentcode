@@ -9,6 +9,37 @@ const state = {
   mode: {}, projects: [], project: '', data: null, page: 'overview',
   jobs: [], taskFilter: '', queryDone: false,
 };
+let projectVersion = 0;
+let viewVersion = 0;
+let modalVersion = 0;
+let queryVersion = 0;
+let overviewRequest = 0;
+let overviewApplied = 0;
+let jobsRequest = 0;
+let jobsApplied = 0;
+
+function viewContext() {
+  return { project: state.project, projectVersion, viewVersion };
+}
+
+function sameProject(context) {
+  return context.project === state.project && context.projectVersion === projectVersion;
+}
+
+function sameView(context) {
+  return sameProject(context) && context.viewVersion === viewVersion;
+}
+
+function closeModal() {
+  modalVersion++;
+  $('modal').hidden = true;
+}
+
+function modalRequest() {
+  const context = viewContext();
+  const version = ++modalVersion;
+  return () => sameView(context) && version === modalVersion;
+}
 
 function esc(s) {
   return (s ?? '').toString().replace(/[&<>"']/g,
@@ -41,9 +72,9 @@ const ROUTES = {
 };
 
 /* ---------- 网络 ---------- */
-function withProject(path) {
+function withProject(path, project = state.project) {
   const u = new URL(path, location.origin);
-  if (state.project) u.searchParams.set('project', state.project);
+  if (project) u.searchParams.set('project', project);
   return u.pathname + u.search;
 }
 async function getJSON(path) {
@@ -54,12 +85,12 @@ async function getJSON(path) {
     return { ok: false, status: 0, data: { error: String(e) } };
   }
 }
-async function postJSON(path, body, header = 'X-Control') {
+async function postJSON(path, body, header = 'X-Control', project = state.project) {
   try {
-    const res = await fetch(withProject(path), {
+    const res = await fetch(withProject(path, project), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', [header]: '1' },
-      body: JSON.stringify({ ...body, project: state.project }),
+      body: JSON.stringify({ ...body, project }),
     });
     return { ok: res.ok, status: res.status, data: await res.json().catch(() => ({})) };
   } catch (e) {
@@ -95,6 +126,13 @@ function flow(t, d) {
 
 const pendingOf = d => d.pending_approvals || (d.approvals || []).filter(a => a.decision === 'pending');
 
+function decisionButtons(approval) {
+  const revision = approval.artifact_hash ? `${approval.id}:${approval.artifact_hash}` : '';
+  const target = `data-task="${esc(approval.task_id)}" data-revision="${esc(revision)}"`;
+  return `<button class="btn btn-sm btn-ok" data-decide="approved" ${target}>批准</button>
+    <button class="btn btn-sm btn-bad" data-decide="rejected" ${target}>驳回</button>`;
+}
+
 function pendingCards(d) {
   const rows = pendingOf(d);
   if (!rows.length) return '<div class="empty">没有待审批的闸门。用「操作 → 新建需求」创建任务并启动。</div>';
@@ -107,8 +145,7 @@ function pendingCards(d) {
       acts.push(`<button class="btn btn-sm" data-compare="${esc(a.task_id)}">原始 vs 标准需求</button>`);
     }
     if (state.mode.control) {
-      acts.push(`<button class="btn btn-sm btn-ok" data-decide="approved" data-task="${esc(a.task_id)}">批准</button>`);
-      acts.push(`<button class="btn btn-sm btn-bad" data-decide="rejected" data-task="${esc(a.task_id)}">驳回</button>`);
+      acts.push(decisionButtons(a));
     } else {
       acts.push('<span class="meta-text">只读模式</span>');
     }
@@ -120,14 +157,13 @@ function pendingCards(d) {
 }
 
 function taskRows(d, rows) {
-  const waiting = new Set(pendingOf(d).map(a => a.task_id));
+  const waiting = new Map(pendingOf(d).map(a => [a.task_id, a]));
   return rows.map(t => {
     const acts = [];
     if (state.mode.control) {
       if (t.status === 'pending') acts.push(`<button class="btn btn-sm" data-start="${esc(t.id)}">启动</button>`);
       if (waiting.has(t.id)) {
-        acts.push(`<button class="btn btn-sm btn-ok" data-decide="approved" data-task="${esc(t.id)}">批准</button>`);
-        acts.push(`<button class="btn btn-sm btn-bad" data-decide="rejected" data-task="${esc(t.id)}">驳回</button>`);
+        acts.push(decisionButtons(waiting.get(t.id)));
       }
     }
     acts.push(`<button class="btn btn-sm" data-detail="${esc(t.id)}">详情</button>`);
@@ -319,21 +355,13 @@ function actionsView(d) {
     <section class="panel">
       <div class="panel-head"><h2>新建交付需求</h2><span class="meta-text">写入 ${esc(state.project)} 账本</span></div>
       <form class="card-body" id="act-form">
-        <label><b>标题 <span class="req">*</span></b>
-          <input id="at-title" maxlength="120" placeholder="例：stats 接口增加 startedAt 字段"></label>
-        <label><b>目标 <span class="req">*</span></b>
-          <textarea id="at-goal" placeholder="用户可观察的行为变化，一两句话说清"></textarea></label>
-        <label><b>验收标准 <span class="req">*</span></b>
-          <textarea id="at-ac" placeholder="一行一条，例：GET /api/stats 返回 ISO 8601 的 startedAt"></textarea></label>
-        <label>非目标<textarea id="at-non" placeholder="明确不做什么（可空）"></textarea></label>
-        <div class="row-2">
-          <label>后端范围（逗号分隔）<input id="at-be" placeholder="apps/api/src/**"></label>
-          <label>前端范围（逗号分隔）<input id="at-fe" placeholder="apps/web/src/**"></label>
-        </div>
+        <label><b>内容 <span class="req">*</span></b>
+          <span class="meta-text">自由文本：想做什么、为什么、有何约束；标准规格书由需求 Agent 转换生成</span>
+          <textarea id="at-content" rows="7" placeholder="例：stats 接口增加 startedAt 字段，前端要在房间页展示启动时间…"></textarea></label>
         <label>优先级<select id="at-prio">
           <option value="normal">normal</option><option value="high">high</option><option value="low">low</option>
         </select></label>
-        <label><b>参考图片</b> <span class="meta-text">PNG/JPEG，最多 4 张，单张 ≤2 MB</span>
+        <label><b>附件</b> <span class="meta-text">PNG/JPEG，最多 4 张，单张 ≤2 MB</span>
           <input id="at-images" type="file" accept="image/png,image/jpeg" multiple>
           <div id="at-thumbs" class="thumbs"></div></label>
         <label class="check-inline"><input type="checkbox" id="at-autostart" checked>
@@ -409,6 +437,10 @@ function updateChrome(d) {
 }
 
 function setPage(page) {
+  if (page !== state.page) {
+    viewVersion++;
+    closeModal();
+  }
   state.page = page;
   const meta = ROUTES[page] || ROUTES.overview;
   $('page-title').textContent = meta[0];
@@ -421,7 +453,7 @@ function setPage(page) {
 function renderPage() {
   const v = $('view');
   if (state.page === 'query') { v.innerHTML = queryView(); return; }
-  if (state.page === 'settings') { SettingsView.load(state.project); return; }
+  if (state.page === 'settings') { SettingsView.load(); return; }
   if (!state.data) { v.innerHTML = '<div class="empty">加载中…</div>'; return; }
   const d = state.data;
   if (state.page === 'overview') v.innerHTML = overviewView(d);
@@ -441,7 +473,11 @@ function refreshPage() {
 
 /* ---------- 数据 ---------- */
 async function loadOverview(initial = false) {
+  const context = viewContext();
+  const request = ++overviewRequest;
   const { ok, data } = await getJSON('/api/overview');
+  if (!sameProject(context) || request < overviewApplied) return;
+  overviewApplied = request;
   if (!ok || data.error) {
     toast(data.error || '读取快照失败', 'jbad');
     state.data = null;
@@ -450,15 +486,20 @@ async function loadOverview(initial = false) {
     }
     return;
   }
+  const needsRender = !state.data;
   state.data = data;
   updateChrome(data);
-  if (initial) renderPage(); else refreshPage();
+  if (state.page === 'settings' || state.page === 'query') return;
+  if (initial || needsRender) renderPage(); else refreshPage();
 }
 
 async function pollJobs() {
   if (!state.mode.control) return;
+  const context = viewContext();
+  const request = ++jobsRequest;
   const { ok, data } = await getJSON('/api/jobs');
-  if (!ok) return;
+  if (!sameProject(context) || request < jobsApplied || !ok) return;
+  jobsApplied = request;
   state.jobs = data.jobs || [];
   const j = state.jobs[0];
   const bar = $('jobbar');
@@ -479,7 +520,9 @@ function toast(msg, cls = 'jrun') {
 }
 
 async function act(path, payload) {
+  const context = viewContext();
   const { ok, data } = await postJSON(path, payload);
+  if (!sameProject(context)) return;
   if (!ok) { toast('操作失败：' + (data.error || ''), 'jbad'); return; }
   toast(`已提交 ${data.action || ''} · ${(data.task_id || '').slice(0, 8)}（${data.job_id || '-'}），执行中…`);
   pollJobs();
@@ -496,6 +539,12 @@ function fileToBase64(file) {
 }
 
 function originalHtml(o) {
+  if (o.content) {
+    return `<dl class="kv">
+      <dt>内容</dt><dd><pre class="doc">${esc(o.content)}</pre></dd>
+      <dt>优先级</dt><dd>${esc(o.priority || '-')}</dd>
+    </dl>`;
+  }
   const acs = (o.acceptance_criteria || []).map(x => `<li>${esc(x)}</li>`).join('');
   const scope = Object.entries(o.scope || {}).map(([k, v]) =>
     `<li>${esc(k)}: ${esc((v || []).join(', '))}</li>`).join('');
@@ -512,16 +561,18 @@ function originalHtml(o) {
 function thumbsHtml(list) {
   if (!list || !list.length) return '';
   return `<div class="thumbs">${list.map(a =>
-    `<a href="${esc(a.url)}" target="_blank" rel="noopener" title="${esc(a.name)}">
-       <img src="${esc(a.url)}" alt="${esc(a.name)}">
+    `<a href="${esc(withProject(a.url))}" target="_blank" rel="noopener" title="${esc(a.name)}">
+       <img src="${esc(withProject(a.url))}" alt="${esc(a.name)}">
        <span class="meta-text">${esc(a.name)} · ${Math.round((a.size || 0) / 1024)} KB</span></a>`).join('')}</div>`;
 }
 
 async function showRequirementCompare(taskId) {
+  const isCurrent = modalRequest();
   const [det, art] = await Promise.all([
     getJSON(`/api/task/detail?task_id=${encodeURIComponent(taskId)}`),
     getJSON(`/api/artifact?task_id=${encodeURIComponent(taskId)}&kind=requirements`),
   ]);
+  if (!isCurrent()) return;
   if (!det.ok) { toast('读取失败：' + (det.data.error || ''), 'jbad'); return; }
   const data = det.data, original = data.original || {};
   const rawText = original.requirement || (data.task && data.task.requirement) || '（无原始需求）';
@@ -529,7 +580,8 @@ async function showRequirementCompare(taskId) {
   $('m-title').textContent = `原始需求 vs Agent 标准需求 · ${taskId.slice(0, 8)}`;
   $('m-body').innerHTML = `<div class="compare">
     <div class="cmp-col"><h3>原始需求（用户填写）</h3>
-      ${original.title ? originalHtml(original) : `<pre class="doc">${esc(rawText)}</pre>`}
+      ${(original.content || original.title)
+          ? originalHtml(original) : `<pre class="doc">${esc(rawText)}</pre>`}
       ${thumbsHtml(data.attachments)}
     </div>
     <div class="cmp-col"><h3>Agent 标准需求（REQUIREMENTS.md）</h3>
@@ -540,8 +592,10 @@ async function showRequirementCompare(taskId) {
 }
 
 async function showArtifact(taskId, kind) {
+  const isCurrent = modalRequest();
   const { ok, data } = await getJSON(
     `/api/artifact?task_id=${encodeURIComponent(taskId)}&kind=${encodeURIComponent(kind)}`);
+  if (!isCurrent()) return;
   if (!ok) { toast('读取失败：' + (data.error || ''), 'jbad'); return; }
   $('m-title').textContent = `${kind} · ${taskId.slice(0, 8)}`;
   if (kind === 'prototype_html') {
@@ -556,7 +610,9 @@ async function showArtifact(taskId, kind) {
 }
 
 async function showDetail(taskId) {
+  const isCurrent = modalRequest();
   const { ok, data } = await getJSON(`/api/task/detail?task_id=${encodeURIComponent(taskId)}`);
+  if (!isCurrent()) return;
   if (!ok) { toast('读取失败：' + (data.error || ''), 'jbad'); return; }
   const arts = Object.entries(data.artifacts || {}).map(([k, v]) =>
     `<tr><td>${esc(k)}</td><td class="mono">${esc(v.path || '-')}</td>
@@ -590,11 +646,12 @@ async function showDetail(taskId) {
 }
 
 /* ---------- 驳回理由（R1：必填，回传上游 Agent） ---------- */
-function showReject(taskId) {
+function showReject(taskId, revision) {
+  modalVersion++;
   $('m-title').textContent = `驳回 · ${taskId.slice(0, 8)}`;
   $('m-body').innerHTML =
     `<div class="meta-text">驳回理由必填（1~2000 字）。理由将回传给上游 Agent，由它判断是否按反馈修订产物后重新提审。</div>
-     <form id="reject-form" data-task="${esc(taskId)}" style="margin-top:12px">
+     <form id="reject-form" data-task="${esc(taskId)}" data-revision="${esc(revision)}" style="margin-top:12px">
        <textarea id="reject-reason" rows="5" maxlength="2000" style="width:100%"
          placeholder="例如：验收标准缺少移动端适配；G2 文件归属表未覆盖 AC-2；staging 冒烟未通过……"></textarea>
        <div style="margin-top:10px"><button type="submit" class="btn btn-bad">确认驳回</button>
@@ -606,12 +663,15 @@ function showReject(taskId) {
 
 /* ---------- 查询 ---------- */
 async function runQuery() {
+  const context = viewContext();
+  const request = ++queryVersion;
   const q = ($('q-key')?.value || '').trim();
   const status = $('q-status')?.value || '';
   const limit = $('q-limit')?.value || '100';
   state.queryDone = true;
   const { ok, data } = await getJSON(
     `/api/search?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`);
+  if (!sameView(context) || request !== queryVersion) return;
   if (!ok) { $('q-result').innerHTML = `<div class="empty">${esc(data.error || '查询失败')}</div>`; return; }
   const rows = data.tasks || [];
   $('q-count').textContent = `共 ${rows.length} 条`;
@@ -622,6 +682,8 @@ async function runQuery() {
 async function switchProject(name) {
   if (!name || name === state.project) return;
   state.project = name;
+  projectVersion++;
+  const context = viewContext();
   state.data = null;
   state.jobs = [];
   state.taskFilter = '';
@@ -629,22 +691,29 @@ async function switchProject(name) {
   localStorage.setItem('ac.project', name);
   $('jobbar').hidden = true;
   $('dbhint').textContent = `${name}/state.db`;
+  $('gen').textContent = '';
+  $('state').textContent = '—';
+  $('state').className = 'badge';
+  $('nav-tasks').textContent = '';
+  $('nav-approvals').textContent = '';
+  closeModal();
+  renderPage();
   await loadOverview(true);
-  if (state.mode.control) pollJobs();
+  if (sameProject(context) && state.mode.control) pollJobs();
 }
 
 /* ---------- 事件 ---------- */
 document.addEventListener('click', e => {
   const btn = e.target.closest('button');
   if (!btn) return;
-  if (btn.id === 'm-close') { $('modal').hidden = true; return; }
-  if (btn.id === 'refresh') { loadOverview(false); if (state.page === 'settings') SettingsView.load(state.project); return; }
+  if (btn.id === 'm-close') { closeModal(); return; }
+  if (btn.id === 'refresh') { loadOverview(false); if (state.page === 'settings') SettingsView.load(); return; }
   if (btn.dataset.art) return showArtifact(btn.dataset.art, btn.dataset.kind);
   if (btn.dataset.compare) return showRequirementCompare(btn.dataset.compare);
   if (btn.dataset.start) return act('/api/task/start', { task_id: btn.dataset.start });
-  if (btn.dataset.decide === 'rejected') return showReject(btn.dataset.task);
+  if (btn.dataset.decide === 'rejected') return showReject(btn.dataset.task, btn.dataset.revision);
   if (btn.dataset.decide) return act('/api/task/decide',
-    { task_id: btn.dataset.task, decision: btn.dataset.decide, by: 'console' });
+    { task_id: btn.dataset.task, decision: btn.dataset.decide, by: 'console', revision: btn.dataset.revision });
   if (btn.dataset.detail) return showDetail(btn.dataset.detail);
   if (btn.dataset.rerun) {
     const from = prompt('从哪个节点重跑？可用：requirements / design / prototype / implement / review / test / deploy / retro', 'test');
@@ -685,22 +754,20 @@ document.addEventListener('submit', async e => {
     const btn = e.target.querySelector('button[type=submit]');
     btn.disabled = true;
     hint.textContent = '提交中…';
-    $('modal').hidden = true;
-    await act('/api/task/decide', { task_id: e.target.dataset.task, decision: 'rejected', reason, by: 'console' });
+    closeModal();
+    await act('/api/task/decide', {
+      task_id: e.target.dataset.task, decision: 'rejected', reason, by: 'console',
+      revision: e.target.dataset.revision,
+    });
     return;
   }
   if (e.target.id !== 'act-form') return;
   e.preventDefault();
+  const context = viewContext();
+  const autostart = $('at-autostart').checked;
   const btn = $('at-submit'), out = $('at-result');
   const payload = {
-    title: $('at-title').value.trim(),
-    goal: $('at-goal').value.trim(),
-    acceptance_criteria: $('at-ac').value.split('\n').map(x => x.trim()).filter(Boolean),
-    non_goals: $('at-non').value.trim(),
-    scope: {
-      be: $('at-be').value.split(',').map(x => x.trim()).filter(Boolean),
-      fe: $('at-fe').value.split(',').map(x => x.trim()).filter(Boolean),
-    },
+    content: $('at-content').value.trim(),
     priority: $('at-prio').value,
   };
   btn.disabled = true;
@@ -721,25 +788,23 @@ document.addEventListener('submit', async e => {
     out.textContent = '图片不合格：' + err.message;
     return;
   }
-  const { ok, data } = await postJSON('/api/intake', payload, 'X-Intake');
+  const { ok, data } = await postJSON('/api/intake', payload, 'X-Intake', context.project);
   if (!ok) {
     out.className = 'hint s-failed';
     out.textContent = '创建失败：' + (data.error || '');
   } else {
     let msg = '已创建 ' + data.task_id;
-    if ($('at-autostart').checked) {
-      const r2 = await postJSON('/api/task/start', { task_id: data.task_id });
+    if (autostart) {
+      const r2 = await postJSON('/api/task/start', { task_id: data.task_id }, 'X-Control', context.project);
       msg += r2.ok ? `，已提交启动（${r2.data.job_id || '-'}）` : `，启动失败：${r2.data.error || ''}`;
-      pollJobs();
+      if (sameProject(context)) pollJobs();
     } else {
       msg += '；可在右侧「待启动任务」手动启动';
     }
+    if (!sameView(context)) return;
     out.className = 'hint s-done';
     out.textContent = msg;
-    $('at-title').value = '';
-    $('at-goal').value = '';
-    $('at-ac').value = '';
-    $('at-non').value = '';
+    $('at-content').value = '';
     if ($('at-images')) $('at-images').value = '';
     if ($('at-thumbs')) $('at-thumbs').innerHTML = '';
     loadOverview(false);

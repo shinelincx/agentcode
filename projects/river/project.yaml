@@ -15,6 +15,15 @@ model:
   default: gpt-6.1-terra
   degraded: gpt-6.1-sol     # DEGRADED 状态角色降级备选（轻档）
   strong_roles: [requirements, design, review]   # 永不降级（V2.2 §8.4）
+  roles:                       # 各 Agent 独立模型；缺省继承 default
+    requirements: gpt-6.1-terra  # 需求标准化
+    design: gpt-6.1-terra        # 架构与验收映射
+    prototype: gpt-6.1-terra     # 原型/UI
+    review: gpt-6.1-terra        # 独立审查
+    implement: gpt-6.1-terra     # 前后端实现与门禁修复
+    test: gpt-6.1-terra          # 预留：当前仅执行确定性测试命令
+    deploy: gpt-6.1-terra        # 预留：当前仅执行确定性部署命令
+    retro: gpt-6.1-terra         # 复盘生成（retro.generate=true 时）
 
 budget:                      # 订阅模式：call_count 主单位（配额 = 订阅资源保护）
   unit: calls
@@ -31,6 +40,7 @@ gates:                       # 审批人 = 单人值守（P0a 表单 A 归档）
 
 review:                      # C 层自动审查（implement 之后、test 之前）
   codex: true                # true：追加 codex 审 diff（FAIL → gate_failed，消耗 1 次调用）
+  require_for_sensitive: true
 
 retro:                       # 复盘生成（G3 批准后；不影响交付终态）
   generate: false            # true：用 codex 生成 RETRO.md（失败仅留痕）

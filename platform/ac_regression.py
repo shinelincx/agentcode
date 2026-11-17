@@ -47,6 +47,14 @@ def _count(db: sqlite3.Connection, sql: str, args: tuple = ()) -> int:
     return int(db.execute(sql, args).fetchone()[0])
 
 
+def _approve_g2(ws, app, config):
+    from task_approval import resume
+
+    snap = app.get_state(config)
+    assert snap.next == ("review_g2",)
+    resume(ws / "state.db", snap.values["task_id"], app, config, snap, "approved", "fixture reviewer")
+
+
 # ---------------- AC-01 账本与图状态一致性 ----------------
 
 def ac01(ws: Path):
@@ -106,7 +114,7 @@ def ac02b(ws: Path):
 
     def _ac02b_codex(prompt, workdir, **kw):
         # 文档生成阶段正常返回；实现阶段模拟"只读空跑"（C-007 场景）
-        if ("Write REQUIREMENTS.md" in prompt or "Write DESIGN.md" in prompt
+        if ("You are the Requirements Agent" in prompt or "You are the Design Agent" in prompt
                 or "You are the Prototype Agent" in prompt):
             return _stub_codex(prompt, workdir, **kw)
         return w.WorkerResult(
@@ -114,7 +122,7 @@ def ac02b(ws: Path):
             "I couldn't make the change: read-only. No files were changed.")
     w.run_codex = _ac02b_codex
     w.run_gate = lambda command, workdir, timeout=900: (True, "gate on old code passes (false positive)")
-    w.git = lambda workdir, *args: (0, "")  # 无改动 → 必须判失败，不得进门禁
+    w.git = lambda workdir, *args: (0, "0" * 40 if args[:2] == ("rev-parse", "--verify") else "")
 
     t = ledger.create_task(db, "ac02b")
     cfg = {"configurable": {"thread_id": "ac02b"}}
@@ -147,69 +155,116 @@ import worker as _worker_mod
 
 _REAL_RUN_CODEX = _worker_mod.run_codex
 _REAL_RUN_GATE = _worker_mod.run_gate
+_REAL_GIT = _worker_mod.git
 
 
 def _stub_codex(prompt, workdir, **kw):
-    """A2 起 requirements/design 也走 codex：桩按 prompt 返回合法 Markdown 文档。
-
-    原型节点由 Agent 写文件：桩按 prompt 中的目录写 index.html + PROTOTYPE.md。
-    """
-    import re
-
+    """返回 Markdown 或结构化产物，Worker 桩不写入业务仓库。"""
     import worker as w
-    if "Write REQUIREMENTS.md" in prompt:
-        out = ("# REQUIREMENTS · task stub\n\n## 需求\n- stub requirement: add a sample field\n\n"
+    schema = kw.get("output_schema") or {}
+    if "decision" in schema.get("properties", {}):
+        out = json.dumps({"decision": "KEEP", "reason": "桩保留原稿", "edits": []})
+    elif "You are the Requirements Agent" in prompt:
+        title = next(line for line in prompt.splitlines() if line.startswith("# REQUIREMENTS · task "))
+        out = (f"{title}\n\n## 需求\n- stub requirement: add a sample field\n\n"
                "## 验收标准\n- AC-1: stub acceptance criterion\n- AC-2: stub second criterion\n\n"
                "## 非目标\n- nothing else\n")
-    elif "Write DESIGN.md" in prompt:
-        out = ("# DESIGN · task stub\n\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
+    elif "You are the Design Agent" in prompt:
+        title = next(line for line in prompt.splitlines() if line.startswith("# DESIGN · task "))
+        out = (f"{title}\n\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
                "| apps/api/src/index.ts | be |\n| apps/web/src/app.tsx | fe |\n\n"
-               "## 实现策略\nserial be → fe\n\n"
+               "## 实现策略\n- 执行顺序：be → fe\n- 前端使用后端返回值。\n\n"
                "## 验收映射\n- AC-1 → apps/api/src/index.ts\n- AC-2 → apps/web/src/app.tsx\n")
     elif "You are the Prototype Agent" in prompt:
-        target = Path(re.search(r"Prototype directory:\s*(.+)", prompt).group(1).strip())
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "index.html").write_text(
+        html = (
             "<!DOCTYPE html>\n<html lang=\"zh\">\n<head><meta charset=\"utf-8\">"
             "<title>stub prototype</title></head>\n<body>\n<h1>stub prototype</h1>\n"
             "<p>静态占位原型：用于验证原型节点产物校验与 G2 审批哈希绑定。</p>\n"
             "<p>该页面不连接任何后端接口，仅覆盖最小长度与 HTML 骨架校验。</p>\n"
-            "<button>示例操作</button>\n</body>\n</html>\n", encoding="utf-8")
-        (target / "PROTOTYPE.md").write_text(
+            "<button id=\"example-action\">示例操作</button>\n</body>\n</html>\n")
+        note = (
             "# PROTOTYPE · stub\n\n## 原型说明\n首页提示区域的静态占位原型，"
             "包含标题与操作按钮，用于验证产物校验流程。\n\n"
-            "## 验收映射\n- AC-1 → h1 标题\n- AC-2 → button 操作\n\n"
-            "## 局限\n静态页面，无真实接口与状态流转。\n", encoding="utf-8")
-        out = "prototype stub written"
+            "## 验收映射\n- AC-1 → 原型演示 | #example-action | 打开页面 | 显示示例操作\n"
+            "- AC-2 → 后续验证 | 验收测试运行现有服务入口\n\n"
+            "## 局限\n静态页面，无真实接口与状态流转。\n")
+        out = json.dumps({"index_html": html, "prototype_md": note})
     elif "You are the Review Agent" in prompt:
-        out = (f"# REVIEW · task stub\n\n## 结论\n{_REVIEW_VERDICT['value']} stub verdict\n\n"
-               "## 问题\n- 无\n\n## 建议\n- 无\n")
-    elif "You are the Retrospective Agent" in prompt:
-        out = ("# RETRO · task stub\n\n## 结果\nstub delivered\n\n## 偏差\n无\n\n"
-               "## 经验\nstub lesson\n\n## 后续动作\n无\n")
+        failed = _REVIEW_VERDICT["value"] == "FAIL"
+        rows = [
+            {"ac": "AC-1", "status": "VIOLATED" if failed else "VERIFIED",
+             "source": "NONE" if failed else "HEAD", "ref": "" if failed else "apps/api/src/index.ts",
+             "line": 0 if failed else 1},
+            {"ac": "AC-2", "status": "VERIFIED", "source": "HEAD", "ref": "apps/web/src/app.tsx", "line": 1},
+        ]
+        out = json.dumps({"verdict": _REVIEW_VERDICT["value"], "reason": "stub verdict", "criteria": rows,
+                         "findings": [{"severity": "high", "path": "apps/api/src/index.ts", "side": "HEAD",
+                                       "line": 1, "end_line": 1, "ac": "AC-1", "rule": "",
+                                       "evidence": "stub defect", "fix": "fix and verify AC-1"}] if failed else []})
+    elif {"inferences", "pending", "actions", "candidates"} == schema.get("properties", {}).keys():
+        out = json.dumps({"inferences": [], "pending": [], "actions": [], "candidates": []})
     else:
         _PROMPTS.append(prompt)
         out = "stub implement report"
-    return w.WorkerResult(0, out + "\ntokens used\n  10\n", 10, "stub")
+    return w.WorkerResult(0, out + "\ntokens used\n  10\n", 10, "stub", final_message=out)
+
+
+def _stub_lane_git(be="apps/api/src/index.ts", fe="apps/web/src/app.tsx"):
+    branch = ""
+    dirty = staged = False
+    base = head = "0" * 40
+    history = {}
+
+    def _fake_git(workdir, *args):
+        nonlocal branch, dirty, staged, head
+        if len(args) >= 3 and args[0] == "checkout" and args[1] == "-B":
+            branch = args[2]
+            if args[3] == base or args[3] in history:
+                head = args[3]
+            dirty, staged = True, False
+            return (0, "")
+        path = fe if branch.endswith("-fe") else be
+        if args[:2] == ("status", "--porcelain") and dirty:
+            suffix = "\0" if "-z" in args else "\n"
+            return (0, ("M  " if staged else " M ") + path + suffix)
+        if args[0] == "symbolic-ref":
+            return (0, branch)
+        if args[:2] == ("rev-parse", "--verify"):
+            ref = args[-1].removesuffix("^{commit}")
+            return 0, head if ref == "HEAD" else ref if ref in history else base
+        if args[0] == "rev-list":
+            commit = args[-1]
+            return 0, f"{commit} {history[commit][0]}"
+        if args[0] == "show" and ":" in args[-1]:
+            return 0, "stub source\n"
+        if args[:2] == ("diff", "--name-only") and args[-1] == "--":
+            start, end = args[-3:-1]
+            touched = []
+            while start != end and end in history:
+                end, name = history[end]
+                touched.append(name)
+            return 0, "".join(name + "\0" for name in dict.fromkeys(touched))
+        if args[:2] == ("diff", "--no-ext-diff"):
+            return 0, "@@ -1 +1 @@\n-before\n+stub source\n"
+        if args[0] == "add":
+            staged = True
+        if args[:3] == ("diff", "--cached", "--name-only") and staged:
+            return (0, path + "\0")
+        if args[0] == "commit":
+            dirty = staged = False
+            new = f"{len(history)+1:040x}"
+            history[new] = (head, path)
+            head = new
+        return (0, "")
+    return _fake_git
 
 
 def _stub_worker():
     import worker as w
+
     w.run_codex = _stub_codex
     w.run_gate = lambda command, workdir, timeout=900: (True, "stub gate passed")
-    state = {"branch": ""}
-
-    def _fake_git(workdir, *args):
-        # checkout -B 记录当前 lane 分支：scope 硬校验要求 fe lane 只改 web、be 只改 api
-        if len(args) >= 3 and args[0] == "checkout" and args[1] == "-B":
-            state["branch"] = args[2]
-            return (0, "")
-        if args[:2] == ("status", "--porcelain"):  # C-007 空交付检测：桩须模拟有改动
-            if state["branch"].endswith("-fe"):
-                return (0, "M  apps/web/src/app.tsx\n")
-            return (0, "M  apps/api/src/index.ts\n")
-        return (0, "")
-    w.git = _fake_git
+    w.git = _stub_lane_git()
 
 
 def ac03(ws: Path):
@@ -225,7 +280,7 @@ def ac03(ws: Path):
     state = {
         "task_id": t, "requirement": "ac03", "base_branch": "base",
         "lanes": [{"name": "be", "node": "implement_api", "branch": "b1",
-                   "scope": [], "prompt": "p", "commit_msg": "m"}],
+                   "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}],
     }
     app = g.build_app(g.make_checkpointer(ws / "graph.db"))
     app.invoke(state, cfg)
@@ -237,7 +292,7 @@ def ac03(ws: Path):
     app2.invoke(Command(resume="approved"), cfg)
     check("恢复后停在 G2（G1 结论未丢失）",
           "review_g2" in app2.get_state(cfg).next)
-    app2.invoke(Command(resume="approved"), cfg)
+    _approve_g2(ws, app2, cfg)
 
     values = app2.get_state(cfg).values
     check("恢复后 G1/G2 批准状态保留", values.get("approved_g1") is True and values.get("approved_g2") is True)
@@ -508,9 +563,8 @@ def ac02d(ws: Path):
     import graph as g
     import intake
 
-    base = {"title": "示例需求", "goal": "让 stats 返回 startedAt",
-            "acceptance_criteria": ["返回 ISO 8601 时间", "前端展示启动时间"],
-            "scope": {"be": ["apps/api/src/**"]}, "priority": "normal"}
+    base = {"content": "让 stats 返回 startedAt，前端要在房间页展示启动时间，"
+                       "时间格式用 ISO 8601。", "priority": "normal"}
 
     # 1) 校验拒绝路径（失败不得落库）
     def _task_count() -> int:
@@ -518,10 +572,10 @@ def ac02d(ws: Path):
         return _count(ledger.connect(path), "SELECT COUNT(*) FROM tasks") if path.exists() else 0
 
     for label, mutate in (
-        ("缺标题", lambda p: p.pop("title")),
-        ("空验收标准", lambda p: p.update(acceptance_criteria=[])),
+        ("缺内容", lambda p: p.pop("content")),
+        ("空内容", lambda p: p.update(content="   ")),
+        ("超长内容", lambda p: p.update(content="x" * 8001)),
         ("非法优先级", lambda p: p.update(priority="urgent")),
-        ("非法 lane", lambda p: p.update(scope={"db": ["x"]})),
     ):
         bad = copy.deepcopy(base)
         mutate(bad)
@@ -540,9 +594,12 @@ def ac02d(ws: Path):
     row = db.execute("SELECT requirement, priority, status FROM tasks WHERE id=?",
                      (result["task_id"],)).fetchone()
     check("intake 任务落库且 pending", row is not None and row["status"] == "pending")
-    check("归一化文本含标题与验收标准",
-          row["requirement"].startswith("# 示例需求") and "## 验收标准" in row["requirement"])
-    check("requirement.json 已落盘", Path(result["path"]).is_file())
+    check("归一化文本保留原始内容（自由文本，标准规格由需求 Agent 生成）",
+          row["requirement"].startswith("# 原始需求") and "startedAt" in row["requirement"])
+    record = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    check("requirement.json 已落盘且保存原始内容与优先级",
+          Path(result["path"]).is_file() and record["content"] == base["content"]
+          and record["priority"] == "normal")
 
     # 3) DESIGN.md 文件归属表 → lanes（intake 任务无需手写脚本）
     task_dir = ws / result["task_id"] / "docs"
@@ -684,6 +741,15 @@ def _q_row(db: sqlite3.Connection, cid: str):
 
 
 def ac02f(ws: Path):
+    from unittest.mock import patch
+    import memory
+
+    # This case exercises transport after admission. RETRO-01 exercises admission with real evidence.
+    with patch.object(memory, "_ready", return_value=True):
+        _exercise_memory_outbox(ws)
+
+
+def _exercise_memory_outbox(ws: Path):
     import memory
 
     db = new_db(ws)
@@ -773,6 +839,7 @@ def ac02g(ws: Path):
         f"sys.path.insert(0, {str(platform_dir)!r})\n"
         "from pathlib import Path\n"
         "import memory\n"
+        "memory._ready = lambda *args: True  # transport-only fixture\n"
         "db_path, proj, start_at = sys.argv[1], sys.argv[2], float(sys.argv[3])\n"
         "db = sqlite3.connect(db_path); db.row_factory = sqlite3.Row\n"
         "while time.time() < start_at: time.sleep(0.001)\n"
@@ -1023,10 +1090,10 @@ def _role_gate(failures: tuple[str, ...] = ()):
 def _role_invoke(ws: Path, app, cfg: dict, task_id: str):
     app.invoke({"task_id": task_id, "requirement": "role", "base_branch": "base",
                 "lanes": [{"name": "be", "node": "implement_api", "branch": "b1",
-                           "scope": [], "prompt": "p", "commit_msg": "m"}]}, cfg)
+                           "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}]}, cfg)
     from langgraph.types import Command
     app.invoke(Command(resume="approved"), cfg)  # G1
-    app.invoke(Command(resume="approved"), cfg)  # G2 → 实现/测试/部署
+    _approve_g2(ws, app, cfg)  # G2 → 实现/测试/部署
 
 
 def role01(ws: Path):
@@ -1152,6 +1219,143 @@ def ac12(ws: Path):
          "手工执行：wsl -d Debian -- bash -lc 'cd /mnt/d/project/river && docker compose -f docker-compose.staging.yml up -d && SMOKE_RESTART=1 bash infra/docker/staging-smoke.sh'")
 
 
+# ---------------- INTAKE-01 原始需求发布失败与重试 ----------------
+
+def intake_publication01(ws: Path):
+    from unittest.mock import patch
+
+    import base64
+    import intake
+
+    db = new_db(ws)
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+    payload = {"content": "带附件的原始需求", "images": [
+        {"name": "a.png", "type": "image/png", "data": png},
+        {"name": "b.png", "type": "image/png", "data": png},
+    ]}
+    write_bytes, write_text = Path.write_bytes, Path.write_text
+
+    for name in ("1-a.png", "2-b.png", "requirement.json"):
+        def writer(original):
+            def write(path, *args, **kwargs):
+                if path.name == name:
+                    raise OSError("模拟写盘失败")
+                return original(path, *args, **kwargs)
+            return write
+
+        try:
+            with patch.object(Path, "write_bytes", writer(write_bytes)), \
+                 patch.object(Path, "write_text", writer(write_text)):
+                intake.create_task_from_payload(ws / "state.db", ws, payload)
+        except OSError:
+            check(f"{name} 写失败不留任务行或目录",
+                  _count(db, "SELECT COUNT(*) FROM tasks") == 0
+                  and not any(path.is_dir() for path in ws.iterdir()))
+        else:
+            check(f"{name} 写失败向调用方报告", False)
+
+    with patch.object(ledger, "create_task", side_effect=OSError("模拟提交失败")):
+        try:
+            intake.create_task_from_payload(ws / "state.db", ws, payload)
+        except OSError:
+            check("账本提交失败清理已落盘的任务目录",
+                  _count(db, "SELECT COUNT(*) FROM tasks") == 0
+                  and not any(path.is_dir() for path in ws.iterdir()))
+
+    result = intake.create_task_from_payload(ws / "state.db", ws, payload)
+    task_dir = ws / result["task_id"]
+    check("重试只发布一条完整任务",
+          _count(db, "SELECT COUNT(*) FROM tasks") == 1
+          and (task_dir / "requirement.json").is_file()
+          and len(list((task_dir / "attachments").iterdir())) == 2)
+    legacy = ledger.create_task(db, "历史账本内容")
+    check("旧账本纯文本可读",
+          intake.requirement_text(ws / "state.db", ws, legacy) == "历史账本内容")
+    (ws / legacy / "attachments").mkdir(parents=True)
+    (ws / legacy / "attachments" / "legacy.jpg").write_bytes(b"\xff\xd8\xff")
+    (ws / legacy / "requirement.json").write_text(
+        json.dumps({"title": "历史标题", "goal": "历史目标"}), encoding="utf-8")
+    original = intake.read_original(ws, legacy)
+    check("旧结构化需求和附件目录可读",
+          original["title"] == "历史标题"
+          and intake.requirement_text(ws / "state.db", ws, legacy) == "历史账本内容"
+          and [meta["name"] for _, meta in intake.reference_images(ws, legacy, original)]
+          == ["legacy.jpg"])
+
+
+# ---------------- APPROVAL-01 人工审批产物及恢复 ----------------
+
+def approval_flow01(ws: Path):
+    from unittest.mock import patch
+
+    import dashboard as dash
+    import run_task
+    import task_approval
+
+    db = new_db(ws)
+    task = ledger.create_task(db, "审批产物绑定")
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    runner = dash.ControlRunner(ws, ws / "state.db")
+    runner.execute(task, "start")
+    artifact = ws / task / "docs" / "REQUIREMENTS.md"
+    with artifact.open("a", encoding="utf-8") as out:
+        out.write("\n评审后更新\n")
+
+    try:
+        runner.execute(task, "decide", decision="approved")
+    except dash.ControlError as exc:
+        check("产物变更时控制台拒绝旧审批", exc.code == 409)
+    else:
+        check("产物变更时控制台拒绝旧审批", False)
+        return
+
+    cfg = {"configurable": {"thread_id": task}}
+    app = runner._get_app()
+    check("更新审批摘要后仍停留在 G1",
+          app.get_state(cfg).next == ("review_g1",)
+          and _count(db, "SELECT COUNT(*) FROM approvals WHERE task_id=? AND artifact_hash=? "
+                         "AND decision='pending'", (task, ledger.artifact_digest([artifact]))) == 1)
+    g1_revision = task_approval.pending_revision(ws / "state.db", task)
+    with patch.object(app, "invoke", side_effect=RuntimeError("恢复中断")):
+        try:
+            runner.execute(task, "decide", decision="approved")
+        except RuntimeError:
+            pass
+    check("恢复中断后结论已登记且仍挂起",
+          app.get_state(cfg).next == ("review_g1",)
+          and _count(db, "SELECT COUNT(*) FROM approvals WHERE task_id=? AND decision='approved'", (task,)) == 1)
+
+    with patch.multiple(run_task, DB=ws / "state.db", WS=ws, _app=lambda: app):
+        try:
+            run_task.cmd_decide(task, "rejected", "local", "冲突结论")
+        except SystemExit:
+            check("CLI 拒绝覆盖已登记的结论", True)
+        else:
+            check("CLI 拒绝覆盖已登记的结论", False)
+        run_task.cmd_decide(task, "approved", "local")
+
+    check("CLI 复用原结论恢复到 G2，账本无重复 G1 结论",
+          app.get_state(cfg).next == ("review_g2",)
+          and _count(db, "SELECT COUNT(*) FROM approvals WHERE task_id=? AND gate_name='G1_requirements'", (task,)) == 1)
+    try:
+        runner.execute(task, "decide", decision="approved", revision=g1_revision)
+    except dash.ControlError as exc:
+        check("重复 G1 提交无法批准 G2", exc.code == 409 and app.get_state(cfg).next == ("review_g2",))
+    else:
+        check("重复 G1 提交无法批准 G2", False)
+
+    prototype = Path(app.get_state(cfg).values["prototype_dir"]) / "PROTOTYPE.md"
+    with prototype.open("a", encoding="utf-8") as out:
+        out.write("\n原型修改\n")
+    try:
+        runner.execute(task, "decide", decision="approved")
+    except dash.ControlError as exc:
+        check("G2 原型目录变化须重新评审", exc.code == 409 and app.get_state(cfg).next == ("review_g2",))
+    else:
+        check("G2 原型目录变化须重新评审", False)
+
+
 # ---------------- CONSOLE-01 管理控制台（提需求 / 审批 / 流程视图） ----------------
 
 def console01(ws: Path):
@@ -1167,9 +1371,8 @@ def console01(ws: Path):
     _write_role_config(ws, deploy_cmd="stub-deploy")
 
     created = intake.create_task_from_payload(db_path, ws, {
-        "title": "console", "goal": "drive from web",
-        "acceptance_criteria": ["a1"], "non_goals": "",
-        "scope": {"be": ["apps/api/src/**"]}, "priority": "normal"})
+        "content": "console 驱动：让 stats 返回 startedAt 并在房间页展示，格式 ISO 8601。",
+        "priority": "normal"})
     tid = created["task_id"]
     runner = dash.ControlRunner(ws, db_path)
 
@@ -1277,8 +1480,8 @@ def console01(ws: Path):
         status, _ = req("POST", "/api/task/start", {"task_id": tid})
         check("缺少 X-Control 的写请求被拒（403）", status == 403)
         status, created2 = req("POST", "/api/intake", {
-            "title": "web", "goal": "from console", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {"be": ["apps/api/src/**"]}, "priority": "normal",
+            "content": "web 提需求：stats 接口增加 startedAt 字段，前端房间页展示启动时间。",
+            "priority": "normal",
         }, {"X-Intake": "1"})
         check("网页提需求返回 201 与 task_id",
               status == 201 and bool(created2.get("task_id")))
@@ -1333,15 +1536,15 @@ def console01(ws: Path):
         png_b64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
                    "hQGAhKmMIQAAAABJRU5ErkJggg==")
         status, created3 = req("POST", "/api/intake", {
-            "title": "web-img", "goal": "screenshot driven", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {}, "priority": "normal",
+            "content": "web-img 提需求：参考截图里的布局，stats 增加启动时间展示。",
+            "priority": "normal",
             "images": [{"name": "shot.png", "type": "image/png", "data": png_b64}],
         }, {"X-Intake": "1"})
         tid3 = created3.get("task_id", "") if isinstance(created3, dict) else ""
         check("网页提需求可带参考图片（201）", status == 201 and bool(tid3))
         status, detail3 = req("GET", f"/api/task/detail?task_id={tid3}")
-        check("任务详情返回原始需求字段与附件",
-              status == 200 and detail3.get("original", {}).get("title") == "web-img"
+        check("任务详情返回原始内容与附件",
+              status == 200 and detail3.get("original", {}).get("content", "").startswith("web-img")
               and (detail3.get("attachments") or [{}])[0].get("name") == "shot.png")
         status, blob = req("GET", f"/api/attachment?task_id={tid3}&name=attachments/1-shot.png")
         # req 对二进制按 utf-8 replace 解码（0x89 → U+FFFD），故只核对 PNG 文件头可读
@@ -1350,8 +1553,8 @@ def console01(ws: Path):
         check("附件路径越界被拒（404）", status == 404)
         before = _count(db, "SELECT COUNT(*) FROM tasks")
         status, err = req("POST", "/api/intake", {
-            "title": "bad-img", "goal": "x", "acceptance_criteria": ["a1"],
-            "non_goals": "", "scope": {}, "priority": "normal",
+            "content": "bad-img 提需求：附件类型不合法。",
+            "priority": "normal",
             "images": [{"name": "x.gif", "type": "image/gif", "data": png_b64}],
         }, {"X-Intake": "1"})
         check("图片类型不支持时拒绝且不落库",
@@ -1387,6 +1590,15 @@ model:
   default: gpt-6.1-terra
   degraded: gpt-6.1-sol
   strong_roles: [requirements, design, review]   # 永不降级
+  roles:
+    requirements: gpt-req-base
+    design: gpt-design-base
+    prototype: gpt-prototype-base
+    review: gpt-review-base
+    implement: gpt-implement-base
+    test: gpt-test-base
+    deploy: gpt-deploy-base
+    retro: gpt-retro-base
 
 budget:
   unit: calls
@@ -1444,13 +1656,20 @@ def config01(ws: Path):
     rejected({"budget.thresholds.alert": 0.95}, "阈值倒挂（alert ≥ degraded）被拒且文件不变")
     rejected({"test.gates": ["typecheck", "nope"]}, "test.gates 引用未定义门禁被拒")
     rejected({"deploy.staging.commands": []}, "required=true 且 commands 为空被拒")
+    rejected({"model.roles.implement": ""}, "Agent 独立模型为空被拒且文件不变")
     rejected({"budget.does_not_exist": 1}, "未知配置项被拒（不新建节点）")
+    invalid_roles = config_store.load(path)
+    invalid_roles["model"]["roles"]["unknown"] = "gpt-unknown"
+    check("model.roles 未知 Agent 被整体校验拒绝",
+          any("model.roles 含未知角色" in e for e in config_store.validate(invalid_roles)))
 
     result = config_store.apply_updates(path, {
         "budget.monthly_quota": 25000,
         "budget.max_usage_per_task": 180,
         "budget.thresholds.alert": 0.7,
         "model.strong_roles": ["requirements", "design"],
+        "model.roles.requirements": "gpt-req-v2",
+        "model.roles.implement": "gpt-implement-v2",
         "test.gates": ["typecheck"],
         "deploy.staging.commands": ["stub-deploy-v2"],
         "deploy.staging.timeout_seconds": 120,
@@ -1463,6 +1682,9 @@ def config01(ws: Path):
           and saved["budget"]["max_usage_per_task"] == 180
           and saved["budget"]["thresholds"]["alert"] == 0.7
           and saved["model"]["strong_roles"] == ["requirements", "design"]
+          and saved["model"]["roles"]["requirements"] == "gpt-req-v2"
+          and saved["model"]["roles"]["implement"] == "gpt-implement-v2"
+          and saved["model"]["roles"]["design"] == "gpt-design-base"
           and saved["test"]["gates"] == ["typecheck"]
           and saved["deploy"]["staging"]["commands"] == ["stub-deploy-v2"]
           and saved["deploy"]["staging"]["timeout_seconds"] == 120
@@ -1503,10 +1725,13 @@ def config01(ws: Path):
     ledger.configure_thresholds({})  # 复位，避免影响后续用例
     check("阈值缺省时回退默认值（不继承上一项目的配置）",
           ledger.THRESHOLDS == {"alert": 0.8, "degraded": 0.9, "paused": 1.0})
-    check("模型路由：强角色不降级、普通角色降级",
-          g.route_model("DEGRADED", "requirements") == "gpt-6.1-terra"
+    check("模型路由：角色独立覆盖、默认回退、强角色不降级、普通角色降级",
+          g.route_model("DEGRADED", "requirements") == "gpt-req-v2"
           and g.route_model("DEGRADED", "implement") == "gpt-6.1-sol"
-          and g.route_model("NORMAL", "implement") == "gpt-6.1-terra")
+          and g.route_model("NORMAL", "implement") == "gpt-implement-v2"
+          and g.route_model("ALERT", "prototype") == "gpt-prototype-base"
+          and g.route_model("NORMAL", "unconfigured") == "gpt-6.1-terra"
+          and g.route_model("NORMAL") == "gpt-6.1-terra")
     check("repo_path / codex_home 来自配置",
           g._repo_path() == str(ws) and g._base_codex_home() == ws / "codex-home")
 
@@ -1554,19 +1779,23 @@ def config01(ws: Path):
               status == 400 and path.read_text(encoding="utf-8") == before)
         status, data = req("POST", "/api/config", {
             "updates": {"budget.monthly_quota": 26000,
-                        "deploy.staging.timeout_seconds": 600},
+                        "deploy.staging.timeout_seconds": 600,
+                        "model.roles.design": "gpt-design-http"},
             "by": "console"}, {"X-Control": "1"})
-        check("合法配置经 HTTP 保存并刷新运行时",
+        check("合法配置经 HTTP 保存并刷新运行时（含 Agent 独立模型）",
               status == 200 and set(data["changed"]) == {"budget.monthly_quota",
-                                                         "deploy.staging.timeout_seconds"}
+                                                         "deploy.staging.timeout_seconds",
+                                                         "model.roles.design"}
               and config_store.load(path)["budget"]["monthly_quota"] == 26000
-              and data["runtime_refreshed"] and g.QUOTA == 26000)
+              and data["runtime_refreshed"] and g.QUOTA == 26000
+              and g.route_model("NORMAL", "design") == "gpt-design-http")
         status, page = req("GET", "/config")
         status_js, page_js = req("GET", "/settings.js")
         check("设置页入口可访问且含保存与预算字段",
               status == 200 and "设置" in page
               and status_js == 200 and "保存配置" in page_js
-              and "budget.monthly_quota" in page_js)
+              and "budget.monthly_quota" in page_js
+              and "Agent 独立模型" in page_js and "model.roles." in page_js)
     finally:
         srv.shutdown()
         srv.server_close()
@@ -1592,6 +1821,7 @@ def _proto_task(db, ws: Path, name: str, lanes=_PROTO_LANES):
 
 def prototype01(ws: Path):
     import graph as g
+    import prompt_output
     import worker as w
     from langgraph.types import Command
 
@@ -1609,6 +1839,9 @@ def prototype01(ws: Path):
           g._needs_prototype("## 实现策略\n去掉首页提示", "")[0] is True)
     check("判定：纯后端任务跳过原型",
           g._needs_prototype(be_table, "接口字段调整")[0] is False)
+    check("判定：有理由的 fe 小修复可跳过，缺理由拒绝",
+          g._needs_prototype(fe_table + "\n## 实现策略\n- 原型：跳过 | 只重构既有逻辑，回归测试覆盖。", "")[0] is False
+          and g._needs_prototype(fe_table + "\n## 实现策略\n- 原型：跳过", "")[0] is None)
     check("判定：否定表述不误判（be 表 + 不涉及界面）",
           g._needs_prototype(be_table, "不涉及任何界面，前端无变化")[0] is False)
     check("判定：fe lane 优先于否定表述",
@@ -1648,9 +1881,57 @@ def prototype01(ws: Path):
     check("原型文件变更改变产物摘要（旧审批失效语义）",
           ledger.artifact_digest([str(proto)]) != before)
 
+    valid = prompt_output.prototype_contents(w.run_codex("You are the Prototype Agent", str(ws)).message)
+    confirmed = "## 验收标准\n- AC-1: 页面显示操作。\n- AC-2: 记录存在。"
+    check("混合 UI 与非 UI 映射通过静态产物门禁", not g._prototype_errors(valid, confirmed))
+    for title, old, new, error in (
+        ("遗漏 AC", "- AC-2 → 后续验证 | 验收测试运行现有服务入口", "", "缺少"),
+        ("重复 AC", "AC-2 → 后续验证", "AC-1 → 后续验证", "重复或未知"),
+        ("未知 AC", "AC-2 → 后续验证", "AC-9 → 后续验证", "重复或未知"),
+        ("无效锚点", "#example-action", "#missing", "锚点须唯一存在"),
+    ):
+        bad = valid | {"PROTOTYPE.md": valid["PROTOTYPE.md"].replace(old, new, 1)}
+        check(f"原型产物拒绝{title}", error in g._prototype_errors(bad, confirmed))
+    for tag in ("<link href='https://example.invalid/asset.css'>",
+                "<style>main{background:url(./missing.png)}</style>"):
+        bad = valid | {"index.html": valid["index.html"].replace("</head>", tag + "</head>")}
+        check("原型产物拒绝外部样式或非内嵌资源", bool(g._prototype_errors(bad, confirmed)))
+
+    missing_task = ledger.create_task(db, "缺少已声明参考图")
+    missing_dir = ws / missing_task
+    missing_dir.mkdir()
+    (missing_dir / "requirement.json").write_text(json.dumps({"attachments": [
+        {"rel": "attachments/missing.png"}]}), encoding="utf-8")
+    paths, labels, missing = g._prototype_references(missing_task)
+    check("声明附件缺失与正常无附件区分", paths == [] and missing == ["missing.png"]
+          and "已声明但未传入" in labels)
+    req_file = missing_dir / "REQUIREMENTS.md"
+    req_file.write_text(confirmed, encoding="utf-8")
+    design_file = missing_dir / "DESIGN.md"
+    design_file.write_text(fe_table + "\n## 实现策略\n- 参考图：必需\n", encoding="utf-8")
+    stopped = g.prototype_node({"task_id": missing_task, "design_doc": str(design_file),
+                                "requirements_doc": str(req_file)})
+    check("必需参考缺失阻断当前产物", stopped["prototype_dir"] == ""
+          and _count(db,"SELECT COUNT(*) FROM gate_results WHERE task_id=? AND "
+                     "gate_name='prototype_references' AND passed=0", (missing_task,)) == 1)
+
     # 2) 无界面变化：留痕跳过并继续到 G2
     orig = g._needs_prototype
-    g._needs_prototype = lambda d, r: (False, "test: 无界面变化")
+    normal = w.run_codex
+    proto_calls = []
+
+    def _small_repair(prompt, workdir, **kwargs):
+        from dataclasses import replace
+
+        if "You are the Prototype Agent" in prompt:
+            proto_calls.append(prompt)
+        result = normal(prompt, workdir, **kwargs)
+        if "You are the Design Agent" in prompt:
+            doc = result.message.replace("## 验收映射", "- 原型：跳过 | 小修复由已有界面测试验收。\n\n## 验收映射", 1)
+            result = replace(result, final_message=doc)
+        return result
+
+    w.run_codex = _small_repair
     try:
         app2, cfg2, t2 = _proto_task(db, ws, "prototype-skip")
         app2.invoke(Command(resume="approved"), cfg2)
@@ -1658,7 +1939,7 @@ def prototype01(ws: Path):
         note = ws / t2 / "prototype" / "PROTOTYPE.md"
         check("跳过路径写说明并进入 G2",
               snap2.next == ("review_g2",) and note.is_file()
-              and "跳过原型" in note.read_text(encoding="utf-8")
+              and "小修复由已有界面测试验收" in note.read_text(encoding="utf-8") and not proto_calls
               and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
                              "AND gate_name='prototype_skipped' AND passed=1", (t2,)) == 1)
         check("跳过路径不产生 index.html", not (ws / t2 / "prototype" / "index.html").exists())
@@ -1677,17 +1958,15 @@ def prototype01(ws: Path):
         check("缺 lane 列时不生成原型产物", not (ws / t3 / "prototype").exists())
     finally:
         g._needs_prototype = orig
+        w.run_codex = normal
 
     # 3) 产物不合格：节点失败并阻断流程
     good = w.run_codex
 
     def _bad(prompt, workdir, **kw):
-        import re
         if "You are the Prototype Agent" in prompt:
-            target = Path(re.search(r"Prototype directory:\s*(.+)", prompt).group(1).strip())
-            target.mkdir(parents=True, exist_ok=True)
-            (target / "index.html").write_text("<html></html>", encoding="utf-8")
-            return w.WorkerResult(0, "bad prototype\n", 1, "stub")
+            return w.WorkerResult(0, "bad prototype\n", 1, "stub",
+                                  final_message='{"index_html":"<html></html>"}')
         return good(prompt, workdir, **kw)
 
     w.run_codex = _bad
@@ -1707,16 +1986,827 @@ def prototype01(ws: Path):
                              (t3,)).fetchone()["status"] == "gate_failed"
               and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
                              "AND gate_name='prototype_files' AND passed=0", (t3,)) == 1)
-        check("新一轮生成清空上一轮残留（旧 PROTOTYPE.md 不参与门禁）",
-              not (stale / "PROTOTYPE.md").exists())
+        check("无效的新原型不发布任何一个文件，旧文件不参与门禁",
+              not (stale / "PROTOTYPE.md").exists() and not (stale / "index.html").exists())
     finally:
         w.run_codex = good
 
 
 # ---------------- PROMPT-01 模板六段式 / 契约门禁 / lane 范围硬校验 ----------------
 
+def prompt_contract01(ws: Path):
+    from dataclasses import replace
+    import dashboard as dash
+    import graph as g
+    import worker as w
+
+    db = new_db(ws)
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    with (ws / "project.yaml").open("a", encoding="utf-8") as out:
+        out.write("review:\n  codex: true\n")
+    (ws / "rules.yaml").write_text("review:\n  rework_attempts: 0\n", encoding="utf-8")
+
+    swapped = "## 文件归属表\n| lane | 路径 |\n| --- | --- |\n| 前端 | apps/web/src/app.tsx |\n"
+    design = ws / "checked-design.md"
+    design.write_text(swapped, encoding="utf-8")
+    lanes = g._lanes_from_design(design, None, "demo")
+    check("换列且带别名时原型与实现使用同一 fe lane",
+          g._needs_prototype(swapped, "")[0] is True
+          and [(lane["name"], lane["scope"]) for lane in lanes] == [("fe", ["apps/web/src/app.tsx"])])
+    req = "## 验收标准\n- AC-1: 结果可见"
+    check("文字提到缺少 AC 不算设计映射", not g._ac_coverage("## 验收映射\n- 缺少 AC-1", req)[0])
+    check("单条验收标准允许，空 AC 和重复映射拒绝",
+          g._requirements_ac(req)[0] and not g._requirements_ac("## 验收标准\n稍后确定")[0]
+          and not g._ac_coverage("## 验收映射\n- AC-1 → a\n- AC-1 → b", req)[0])
+    check("同一文件跨 lane 或空路径的归属表被设计门禁拒绝",
+          not g._design_contract(swapped + "| be | apps/web/src/app.tsx |\n", req)[0]
+          and not g._design_contract(swapped + "| be | |\n", req)[0])
+    check("PASS 与待修正问题冲突时拒绝",
+          not g._review_verdict("## 结论\nPASS\n已审查\n## 问题\n- AC-1 未实现\n## 建议\n无")[0])
+
+    runner = dash.ControlRunner(ws, ws / "state.db")
+    for title, line, code in (
+        ("模糊结论", "Insufficient evidence for PASS. Final verdict: FAIL.", 0),
+        ("执行失败", "PASS\n\nKnown evidence.", 1),
+        ("结论冲突", "PASS\nFAIL", 0),
+    ):
+        def stub(prompt, workdir, **kwargs):
+            result = _stub_codex(prompt, workdir, **kwargs)
+            if "You are the Review Agent" in prompt:
+                return replace(result, returncode=code, final_message=line)
+            return result
+
+        w.run_codex = stub
+        task = ledger.create_task(db, title)
+        runner.execute(task, "start")
+        runner.execute(task, "decide", decision="approved")
+        runner.execute(task, "decide", decision="approved")
+        check(f"{title}不放行到 test",
+              _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? AND "
+                         "gate_name='review_agent' AND passed=0", (task,)) == 1
+              and _count(db, "SELECT COUNT(*) FROM node_runs WHERE task_id=? AND node_name='test'", (task,)) == 0)
+
+
+def worker_message01(ws: Path):
+    from unittest.mock import patch
+    import worker as w
+
+    body = "# REQUIREMENTS\n\n## 需求\n纯文档正文。"
+    warning = "WARNING: proceeding, even though we could not create PATH aliases"
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, args, **kwargs):
+            self.dest = Path(args[args.index("--output-last-message") + 1]) if "--output-last-message" in args else None
+
+        def communicate(self, prompt, timeout):
+            if self.dest and prompt == "make artifact":
+                self.dest.write_text(body, encoding="utf-8")
+            return body, "\ntokens used\n   21\n" + warning
+
+    with patch.object(w.subprocess, "Popen", FakeProcess):
+        result = _REAL_RUN_CODEX("make artifact", str(ws), log_dir=str(ws / "logs"))
+        missing = _REAL_RUN_CODEX("missing final message", str(ws), log_dir=str(ws / "logs"))
+    check("最终消息独立，CLI 警告仅进日志",
+          getattr(result, "final_message", result.output) == body and result.tokens == 21
+          and warning in result.output
+          and any(warning in p.read_text(encoding="utf-8") for p in (ws / "logs").glob("*.log")))
+    check("CLI 未生成最终消息时不从 stdout 凑产物",
+          getattr(missing, "final_message", missing.output) == "")
+
+
+def prompt_context01(ws: Path):
+    from dataclasses import replace
+    import base64
+    import dashboard as dash
+    import intake
+    import prompt_output
+    import worker as w
+
+    db = new_db(ws)
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    captured = {}
+
+    def capture(prompt, workdir, **kwargs):
+        result = _stub_codex(prompt, workdir, **kwargs)
+        result = replace(result, output=result.output + "\nWARNING: could not create PATH aliases")
+        if "You are the Requirements Agent" in prompt:
+            captured["requirements"] = prompt
+        elif "You are the Design Agent" in prompt:
+            captured["design"] = prompt
+            if "补充设计说明" in prompt:
+                reply = {"decision": "REVISE", "reason": "补充被指出的实现顺序",
+                         "edits": [{"old_line": "- 前端使用后端返回值。", "new_lines": ["- 前端使用后端返回的已筛选数据。"]}]}
+                result = replace(result, final_message=json.dumps(reply))
+        elif "You are the Prototype Agent" in prompt:
+            captured["prototype"] = (prompt, kwargs["images"], kwargs["sandbox"])
+        return result
+
+    w.run_codex = capture
+    image = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+    runner = dash.ControlRunner(ws, ws / "state.db")
+    for defect in ("前言", "错误标题", "空需求章节"):
+        malformed = ledger.create_task(db, f"首稿测试：{defect}")
+
+        def invalid_draft(prompt, workdir, **kwargs):
+            result = capture(prompt, workdir, **kwargs)
+            doc = result.message.replace(result.message.splitlines()[0],
+                                         f"# REQUIREMENTS · task {malformed[:8]}", 1)
+            if defect == "前言":
+                doc = "下面是规格书。\n" + doc
+            elif defect == "错误标题":
+                doc = doc.replace(malformed[:8], "wrong-id", 1)
+            else:
+                doc = doc.replace("- stub requirement: add a sample field\n", "", 1)
+            return replace(result, final_message=doc)
+
+        w.run_codex = invalid_draft
+        runner.execute(malformed, "start")
+        check(f"需求首稿拒绝{defect}",
+              not (ws / malformed / "docs/REQUIREMENTS.md").exists()
+              and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
+                             "AND gate_name='requirements_doc' AND passed=0", (malformed,)) == 1)
+    w.run_codex = capture
+    added = intake.create_task_from_payload(ws / "state.db", ws, {
+        "content": "展示状态界面", "images": [{"name": "ref.png", "type": "image/png", "data": image}],
+    })
+    task = added["task_id"]
+    runner.execute(task, "start")
+    docs = ws / task / "docs"
+    req = (docs / "REQUIREMENTS.md").read_bytes()
+    req_mtime = (docs / "REQUIREMENTS.md").stat().st_mtime_ns
+    runner.execute(task, "decide", decision="rejected", reason="原范围不变")
+    check("G1 修订可看上版并保留原文",
+          req.decode("utf-8").strip() in captured["requirements"] and "原范围不变" in captured["requirements"]
+          and (docs / "REQUIREMENTS.md").read_bytes() == req
+          and (docs / "REQUIREMENTS.md").stat().st_mtime_ns == req_mtime)
+    check("创建与修订均从独立消息获取产物",
+          b"WARNING: could not create PATH aliases" not in req)
+    check("KEEP 决定与原始理由入账",
+          _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
+                         "AND gate_name='requirements_revision_decision' AND output=?",
+                 (task, "KEEP · 桩保留原稿")) == 1)
+    runner.execute(task, "decide", decision="approved")
+    old_design = (docs / "DESIGN.md").read_text(encoding="utf-8")
+    prompt, images, sandbox = captured["prototype"]
+    expected = str((ws / task / "attachments/1-ref.png").resolve())
+    check("原型 Worker 以只读方式收到真实录入附件与编号引用",
+          images == [expected] and "参考图 1：ref.png" in prompt and sandbox == "read-only")
+    runner.execute(task, "decide", decision="rejected", reason="补充设计说明")
+    check("G2 修订收到本轮驳回理由和上一版设计",
+          old_design.strip() in captured["design"] and "补充设计说明" in captured["design"]
+          and (docs / "DESIGN.md").read_text(encoding="utf-8")
+          == old_design.replace("- 前端使用后端返回值。", "- 前端使用后端返回的已筛选数据。"))
+    check("REVISE 决定与原始理由入账",
+          _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
+                     "AND gate_name='design_revision_decision' AND output=?",
+                 (task, "REVISE · 补充被指出的实现顺序")) == 1)
+    check("G2 反馈随新一轮原型输入传递", "补充设计说明" in captured["prototype"][0])
+    original = "# 文档\r\n- 唯一原稿行\r\n- 重复\r\n- 重复\r\n最后一行"
+    edits = {"decision": "REVISE", "reason": "只替换主体行",
+             "edits": [{"old_line": "- 唯一原稿行", "new_lines": ["- 新内容", "- 新增行"]}]}
+    _, _, revised = prompt_output.apply_revision(json.dumps(edits), original)
+    check("多行定点修订保持原稿的 CRLF 与文件尾",
+          revised == original.replace("- 唯一原稿行", "- 新内容\r\n- 新增行"))
+    for bad in ("- 重复", "- 不存在"):
+        edits["edits"][0]["old_line"] = bad
+        try:
+            prompt_output.apply_revision(json.dumps(edits), original)
+        except ValueError:
+            check(f"拒绝无法唯一定位的原稿行 {bad}", True)
+        else:
+            check(f"拒绝无法唯一定位的原稿行 {bad}", False)
+    db.close()
+
+
+def prompt_scope01(ws: Path):
+    import graph as g
+    import worker as w
+
+    db = new_db(ws)
+    g.bind_workspace(ws)
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    (ws / "rules.yaml").write_text("implement:\n  gate_fix_attempts: 2\n", encoding="utf-8")
+    corrections = []
+    commands = []
+    started = False
+
+    def codex(prompt, workdir, **kwargs):
+        if "You are the Fix Worker" in prompt:
+            corrections.append(prompt)
+            return _gate_fix_reply(w)
+        return _stub_codex(prompt, workdir, **kwargs)
+
+    def git(repo, *args):
+        nonlocal started
+        commands.append(args[0])
+        if args[:2] == ("checkout", "-B"):
+            started = True
+        if args[:2] == ("symbolic-ref", "--short"):
+            return 0, "scope-be"
+        if args[:2] == ("rev-parse", "--verify"):
+            return 0, "0" * 40
+        if args[:2] == ("diff", "--binary"):
+            return 0, f"mock patch {len(corrections)}"
+        if args[:2] == ("status", "--porcelain") and started:
+            after_fix = " M docs/other.md\0" if len(corrections) == 2 else ""
+            return 0, " M apps/api/src/index.ts\0" + after_fix
+        return 0, ""
+
+    w.run_codex = codex
+    w.git = git
+    w.run_gate = lambda cmd, repo: (len(corrections) == 2, f"typecheck error {len(corrections)}")
+    task = ledger.create_task(db, "修正后出现额外文件")
+    g.implement_node({"task_id": task, "lanes": [
+        {"name": "be", "node": "implement_api", "branch": "scope-be",
+         "scope": ["apps/api/src/**"], "prompt": "实现本 lane"},
+    ]})
+    check("修正提示分离允许范围与当前改动，并显示 1/2、2/2",
+          len(corrections) == 2 and all(f"Attempt: {i}/2" in prompt
+          and "Allowed file scope: apps/api/src/**" in prompt
+          for i, prompt in enumerate(corrections, 1)))
+    check("修正后的越界变更在暂存前拦截",
+          "add" not in commands and "commit" not in commands
+          and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
+                         "AND gate_name='lane_scope' AND passed=0", (task,)) == 1)
+    task = ledger.create_task(db, "普通 lane 缺少 scope")
+    g.implement_node({"task_id": task, "lanes": [
+        {"name": "be", "node": "implement_api", "branch": "missing-scope", "lane_instruction": "改需求代码"},
+    ]})
+    check("普通 lane 的空范围在启动 Worker 前拒绝",
+          _count(db, "SELECT COUNT(*) FROM node_runs WHERE task_id=?", (task,)) == 0
+          and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
+                         "AND gate_name='lane_plan' AND passed=0", (task,)) == 1)
+    _stub_worker()
+
+
 _SIX_SECTIONS = ("## Role", "## Context", "## Task", "## Constraints",
                  "## Output contract", "## Self-check")
+
+
+def _gate_fix_reply(w, decision="PATCH_READY", blocker="NONE", *, evidence="fixture diagnostic", rc=0):
+    message = json.dumps({"decision": decision, "blocker": blocker, "evidence": evidence,
+                          "verification": "未运行，由编排执行"}, ensure_ascii=False)
+    return w.WorkerResult(rc, "", 0, message, final_message=message)
+
+
+def lane_delivery01(ws: Path):
+    from copy import deepcopy
+    from unittest.mock import patch
+    import graph as g
+    import lane_eval
+    import prompt_eval
+    import worker as w
+
+    base = next(c["implementation"] for c in prompt_eval.load_cases() if c["id"] == "impl-live-unicode")
+    original_plan, implement = g._lanes_from_design, g.implement_node
+    code_path, test_path = "apps/api/导出.py", "checks/test_existing.py"
+    good_code = 'def summary(rows):\n    return "\\n".join(rows) if rows else "EMPTY-42"\n'
+    previous = "# 已有工作区改动\n"
+
+    for case, expected in (
+        ("worker-exit", "worker_exec"), ("preexisting", "lane_preexisting_changes"),
+        ("test-delete", "test_preservation"), ("test-weaken", "test_preservation"),
+        ("test-skip", "test_preservation"), ("test-discovery", "test_preservation"), ("fix-exit", "gate_fix_exec"),
+        ("last-patch", "final_typecheck"), ("final-mutates", "final_patch_changed"),
+        ("final-success", ""), ("unicode", ""), ("approved-test", ""), ("fixture-patch-scope", "worker_exec"),
+    ):
+        fixture = deepcopy(base)
+        invocations, observed = [], {}
+        if case.startswith("test-") or case == "approved-test":
+            fixture["design"] = fixture["design"].replace("## 实现策略", f"| {test_path} | be |\n\n## 实现策略", 1)
+        if case == "test-delete":
+            fixture["files"]["checks/test_survives.py"] = (
+                "import unittest\nclass KeepsRunning(unittest.TestCase):\n"
+                "    def test_passes(self):\n        self.assertEqual(2, 1 + 1)\n")
+        if case == "test-discovery":
+            fixture["design"] = fixture["design"].replace(f"| {test_path} | be |", "| pytest.ini | be |")
+        if case == "approved-test":
+            fixture["design"] = fixture["design"].replace("## 验收映射",
+                f"- 既有测试调整：{test_path} | 保留断言并补充错误提示\n\n## 验收映射")
+            fixture["paths"].append(test_path)
+
+        def plan(*args):
+            result = original_plan(*args)
+            if case == "preexisting":
+                (Path(g._repo_path()) / code_path).write_text(previous + base["files"][code_path], encoding="utf-8")
+            return result
+
+        def worker(prompt, workdir, **kwargs):
+            repo = Path(g._repo_path())
+            fixing = "You are the Fix Worker" in prompt
+            invocations.append(fixing)
+            if case == "fixture-patch-scope":
+                message = json.dumps({"files": [{"path": code_path, "content": good_code},
+                                                {"path": test_path, "content": ""}], "evidence": "NOT RUN"})
+                return w.WorkerResult(0, "stub", 1, "stub", final_message=message)
+            (repo / code_path).write_text(good_code + ("# 修复 unit\n" if fixing else ""), encoding="utf-8")
+            test = repo / test_path
+            if case == "test-delete":
+                test.unlink()
+            elif case == "test-weaken":
+                test.write_text("import unittest\nclass Existing(unittest.TestCase):\n    def test_new(self):\n        self.assertTrue(True)\n", encoding="utf-8")
+            elif case == "test-skip":
+                test.write_text(base["files"][test_path].replace("    def test_", '    @unittest.skip("temporary")\n    def test_'), encoding="utf-8")
+            elif case == "test-discovery":
+                (repo / "pytest.ini").write_text("[pytest]\ntestpaths = another-suite\n", encoding="utf-8")
+            elif case == "approved-test":
+                test.write_text(base["files"][test_path].replace('"甲\\n乙")', '"甲\\n乙", "保持换行")'), encoding="utf-8")
+            bad = case == "worker-exit" or case == "fix-exit" and fixing
+            if fixing:
+                return _gate_fix_reply(w, rc=9 if bad else 0)
+            return w.WorkerResult(9 if bad else 0, "stub", 1, "stub")
+
+        def gate(command, workdir):
+            if case in ("last-patch", "fix-exit", "final-mutates", "final-success") and "verify.py" not in command:
+                path = Path(workdir) / code_path
+                content = path.read_text(encoding="utf-8")
+                fixed = "# 修复 unit" in content
+                if "unittest" in command:
+                    return fixed, "fixture unit error"
+                if fixed and case == "final-mutates":
+                    path.write_text(content + "# 门禁修改了工作区\n", encoding="utf-8")
+                return not fixed or case != "last-patch", "fixture typecheck error"
+            return _REAL_RUN_GATE(command, workdir)
+
+        def invoke(state):
+            result = implement(state)
+            observed["original"] = (Path(g._repo_path())/code_path).read_text(encoding="utf-8")
+            return result
+
+        with (patch.object(w, "git", _REAL_GIT), patch.object(w, "run_codex", worker),
+              patch.object(w,"run_gate",gate), patch.object(g,"_lanes_from_design",plan),
+              patch.object(g,"implement_node",invoke), patch.object(g,"_worker_codex_home",return_value=ws/"stub")):
+            result = lane_eval.evaluate(fixture, str(ws), None, model_patch=case == "fixture-patch-scope")
+        if expected:
+            blocked = not result["changed"] and any(row["gate_name"] == expected and row["passed"] == 0
+                                                    for row in result["gate_results"])
+            if case == "preexisting":
+                blocked = blocked and not invocations and observed["original"].startswith(previous)
+            if case == "fixture-patch-scope":
+                blocked = blocked and observed["original"] == base["files"][code_path]
+            check(f"真实 Git 回归阻断 {case}", blocked, result["summary"])
+        else:
+            passed = all(c["ok"] for c in result["checks"])
+            if case == "final-success":
+                passed = passed and [row["gate_name"] for row in result["gate_results"]
+                                     if row["gate_name"].startswith("final_") and row["passed"]] == [
+                                         "final_typecheck", "final_unit"]
+            check(f"真实 Git 回归允许 {case}", passed, result["summary"])
+
+
+def gate_fix01(ws: Path):
+    from copy import deepcopy
+    import shlex
+    import subprocess
+    from unittest.mock import patch
+    import graph as g
+    import lane_eval
+    import prompt_eval
+    import worker as w
+
+    runner = subprocess.list2cmdline if sys.platform == "win32" else shlex.join
+    source = ("import sys; print('src/x.ts:12 error TS2304', file=sys.stderr); "
+              "print('summary-' * 300, file=sys.stderr); sys.exit(2)")
+    long_log = _REAL_RUN_GATE(runner([sys.executable, "-c", source]), str(ws))
+    check("真实子进程保留长日志首条错误、退出码和截断提示", long_log.kind == "failed"
+          and long_log.returncode == 2 and "TS2304" in long_log.diagnostic and "前部已截断" in long_log.tail)
+    source = "import time; print('running-' * 300, flush=True); time.sleep(20)"
+    timed = _REAL_RUN_GATE(runner([sys.executable, "-c", source]), str(ws), timeout=0.8)
+    check("超时和长输出同时保留", timed.kind == "timeout" and "GATE TIMEOUT" in timed.diagnostic and bool(timed.tail))
+    missing = _REAL_RUN_GATE("agentcode-eval-command-that-does-not-exist", str(ws))
+    check("真实 shell 区分缺少命令", missing.kind == "environment", missing.detail)
+    redacted = w.gate_result(1, "Error: api_key=fixture-secret")
+    check("诊断和尾部脱敏", "fixture-secret" not in redacted.detail and "<REDACTED>" in redacted.detail)
+
+    base = next(c["implementation"] for c in prompt_eval.load_cases() if c["id"] == "fix-live-unit")
+    target = "apps/api/labels.py"
+    good = "def label(value):\n    return value.strip()\n"
+    for case, expected, worker_calls, unit_runs in (
+        ("missing", "gate_fix_handoff", 0, 1), ("timeout", "gate_fix_handoff", 0, 1),
+        ("unknown", "gate_fix_handoff", 0, 1), ("transient-mutation", "gate_fix_patch", 0, 1),
+        ("noop", "gate_fix_no_progress", 1, 1), ("repeated", "gate_fix_no_progress", 1, 2),
+        ("g2", "gate_fix_handoff", 1, 1), ("budget", "gate_fix_handoff", 0, 1),
+        ("bad-test", "gate_fix_patch", 1, 1), ("transient", "", 0, 2), ("new-diagnostic", "", 2, 4),
+    ):
+        fixture = deepcopy(base)
+        if case == "transient":
+            fixture["seed_patch"][target] = good
+        if case == "bad-test":
+            fixture["design"] = fixture["design"].replace("## 实现策略", "| checks/run_unit.py | be |\n## 实现策略")
+        invocations, runs = [], []
+
+        def repair(prompt, cwd, **kwargs):
+            invocations.append(prompt)
+            if case == "g2":
+                return _gate_fix_reply(w, "BLOCKED", "G2_CONFLICT", evidence="AC-1 需要另一 lane 的接口")
+            if case in ("repeated", "new-diagnostic"):
+                (Path(g._repo_path()) / target).write_bytes((good + f"# fix {len(invocations)}\n").encode("utf-8"))
+            if case == "bad-test":
+                (Path(g._repo_path()) / "checks/run_unit.py").write_bytes(b"# removed assertions\n")
+            return _gate_fix_reply(w)
+
+        def gate(command, cwd):
+            if "checks/run_unit.py" not in command:
+                return _REAL_RUN_GATE(command, cwd)
+            runs.append(command)
+            if case == "missing":
+                return missing
+            if case == "timeout":
+                return timed
+            if case == "unknown":
+                return False, "script finished with no diagnostic"
+            if case == "transient-mutation":
+                (Path(cwd) / target).write_bytes(good.encode("utf-8"))
+                return w.gate_result(1, "ConnectionError: ECONNRESET")
+            if case == "transient":
+                return w.gate_result(1, "ConnectionError: ECONNRESET") if len(runs) == 1 else _REAL_RUN_GATE(command, cwd)
+            if case == "new-diagnostic" and len(runs) >= 2:
+                return (False, "AssertionError: SECOND") if len(runs) == 2 else _REAL_RUN_GATE(command, cwd)
+            return False, "AssertionError: FIRST"
+
+        with (patch.object(w,"git",_REAL_GIT), patch.object(w,"run_codex",repair), patch.object(w,"run_gate",gate),
+              patch.object(g,"_worker_codex_home",return_value=ws/"stub"),
+              patch.object(g,"TASK_CALL_LIMIT",1 if case == "budget" else g.TASK_CALL_LIMIT)):
+            result = lane_eval.evaluate(fixture, str(ws), None)
+        rows = result["gate_results"]
+        routing = (not result["changed"] and any(row["gate_name"] == expected for row in rows)) if expected else bool(result["commits"])
+        check(f"门禁修正分流 {case}", routing and len(invocations) == worker_calls and len(runs) == unit_runs,
+              f"Worker {len(invocations)}、unit {len(runs)}。{result['summary']}")
+        if case == "g2":
+            check("交接保留主责 AC、修正自述且工作任务停止", "## 本 lane 主责 AC" in invocations[0]
+                  and result["task_status"] == "gate_failed" and any(row["gate_name"] == "gate_fix_handoff"
+                  and "G2_CONFLICT" in row["output"] and "AC-1" in row["output"] for row in rows))
+        if case == "new-diagnostic":
+            history = [row["output"] for row in rows if row["gate_name"] == "gate_attempt"]
+            check("逐轮保留首败、第二种失败及两次修正", any("FIRST" in out for out in history)
+                  and any("SECOND" in out for out in history)
+                  and sum(row["gate_name"] == "gate_fix_attempt" for row in rows) == 2
+                  and len(invocations) == 2 and "FIRST" in invocations[1] and "SECOND" in invocations[1])
+
+
+def review_delivery01(ws: Path):
+    from copy import deepcopy
+    from unittest.mock import patch
+    import graph as g
+    import review_delivery as rd
+    import worker as w
+    import yaml
+
+    repo = ws / "repo"
+    repo.mkdir()
+    names = {"be": "apps/api/导出.py", "fe": "apps/web/view.py"}
+    def write(rel, text):
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+    def git(*args):
+        return rd.git(str(repo), *args).strip()
+    def invalid(invoke):
+        try:
+            invoke()
+        except ValueError:
+            return True
+        return False
+
+    with (patch.object(w, "git", _REAL_GIT), patch.object(w, "run_gate", return_value=(True, "checked")),
+          patch.object(g, "_worker_codex_home", return_value=ws/"stub")):
+        git("init", "-q", "-b", "main")
+        for key, value in (("user.name","Fixture"), ("user.email","test@example.invalid"),
+                           ("commit.gpgsign","false"), ("core.autocrlf","false")):
+            git("config", key, value)
+        for rel in names.values():
+            write(rel, "before\n")
+        git("add", ".")
+        git("commit", "-qm", "initial")
+        base = rd.revision(str(repo), "HEAD")
+        config = {"repo_path": str(repo), "review":{"codex":True}, "tech_stack":{
+            "api":"apps/api","web":"apps/web","gate_commands":{"typecheck":"check-type","unit":"check-unit"}}}
+        (ws/"project.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+        g.bind_workspace(ws)
+        db = new_db(ws)
+        task = ledger.create_task(db, "delivery review")
+        requirements = "# Req\n## 验收标准\n- AC-1: alpha\n- AC-2: beta\n"
+        design = ("# Plan\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
+                  f"| {names['be']} | be |\n| {names['fe']} | fe |\n## 实现策略\n- 执行顺序：be → fe\n"
+                  f"## 验收映射\n- AC-1 → {names['be']}\n- AC-2 → {names['fe']}\n")
+        req, plan = ws/"req.md", ws/"design.md"
+        req.write_text(requirements, encoding="utf-8")
+        plan.write_text(design, encoding="utf-8")
+        lanes = g._lanes_from_design(plan, req, task)
+        state = {"task_id":task, "base_branch":"main", "approved_g2":True, "approved_lane_plan":lanes,
+                 "approved_requirements_text":requirements, "approved_design_text":design,
+                 "requirements_doc":str(req), "design_doc":str(plan)}
+        calls = []
+        prompts = []
+        result = {"verdict":"FAIL","reason":"AC-1 is violated","criteria":[
+            {"ac":"AC-1","status":"VIOLATED","source":"NONE","ref":"","line":0},
+            {"ac":"AC-2","status":"VERIFIED","source":"HEAD","ref":names["fe"],"line":1}],
+            "findings":[{"severity":"high","path":names["be"],"side":"BASE","line":1,"end_line":1,
+                         "ac":"AC-1","rule":"","evidence":"removed required behavior","fix":"restore and verify"}]}
+
+        def worker(prompt, cwd, **kwargs):
+            if "You are the Review Agent" in prompt:
+                prompts.append(prompt)
+                message = json.dumps(result, ensure_ascii=False)
+            else:
+                lane = git("branch","--show-current").rsplit("-",1)[-1]
+                calls.append(lane)
+                write(names[lane], f"after-{len(calls)}\n")
+                message = "implementation fixture"
+            return w.WorkerResult(0, message, 0, message, final_message=message)
+
+        with patch.object(w, "run_codex", worker):
+            state.update(g.implement_node(state))
+            pinned = deepcopy(state["delivery"])
+            final_branch = git("branch","--show-current")
+            git("checkout","-q","main")
+            write("unrelated.txt", "advanced main")
+            git("add",".")
+            git("commit","-qm","unrelated")
+            git("checkout","-q",final_branch)
+            pinned_head = pinned["commits"][-1]["commit"]
+            write(names["be"], "dirty-only\n")
+            _, _, found, _, source, _ = rd.collect(str(repo), pinned, lanes, 2000)
+            check("固定交付忽略移动的 base 分支和工作树", found == list(names.values()) and "dirty-only" not in source)
+            git("restore","--",names["be"])
+            check("空交付、错误 base、历史提交缺失均拒绝",
+                  invalid(lambda: rd.collect(str(repo), {}, lanes, 2000)) and
+                  invalid(lambda: rd.collect(str(repo), dict(pinned, base="missing-revision"), lanes, 2000)))
+            _, _, found, patch_text, _, gaps = rd.collect(str(repo), pinned, lanes, 20)
+            check("短预算保留所有变更路径并逐项标记截断", len(gaps) >= 2 and all(path in patch_text for path in found))
+            req.write_text("UNAPPROVED", encoding="utf-8")
+            criteria = {"AC-1": names["be"], "AC-2": names["fe"]}
+            gate_records = rd.gates(db, task, pinned, lambda lane: g._implement_gate_specs(config, lane))
+            check("双 lane 门禁按当前提交分别绑定", set(gate_records) == {"be/unit","fe/unit","be/typecheck","fe/typecheck"})
+            incompatible = deepcopy(result)
+            incompatible["findings"][0]["line"] = 90
+            check("拒绝无法定位的行号", invalid(lambda: rd.validate(
+                str(repo), json.dumps(incompatible), base, pinned_head, found, criteria, gate_records, {}, lanes, [])))
+            state.update(g.review_node(state))
+            check("旧侧定位有效且返工只发送到拥有路径的 lane",
+                  set(state["review_lane_feedback"]) == {"be"} and "BASE:1-1" in state["review_lane_feedback"]["be"]
+                  and "UNAPPROVED" not in prompts[0])
+            state.update(g.implement_node(state))
+            check("定向返工保留原提交链且只重验后继 lane", calls == ["be","fe","be"]
+                  and state["delivery"]["commits"][:2] == pinned["commits"]
+                  and [r["lane"] for r in state["delivery"]["rechecks"]] == ["fe"]
+                  and git("show", f"HEAD:{names['fe']}") == "after-2")
+            result.update(verdict="PASS", reason="缺少 AC-1 所需证据，无法验证", findings=[])
+            result["criteria"][0].update(status="VERIFIED", source="HEAD", ref=names["be"], line=1)
+            blocked = g.review_node(state)
+            check("结论矛盾走证据受阻并禁止再次返工", not blocked["review_report"] and not blocked["review_lane_feedback"])
+            config["test"] = {"gates":["typecheck", "unit"], "reuse_implementation_gates":True,
+                              "reuse_environment_files":["unrelated.txt"]}
+            (ws/"project.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+            light = ledger.create_task(db, "small single lane")
+            light_design = (f"## 文件归属表\n| 路径 | lane |\n| --- | --- |\n| {names['fe']} | fe |\n"
+                            "## 实现策略\n- 执行顺序：fe\n- 审查：轻量 | fe/unit\n"
+                            f"- 门禁证据：AC-1 | fe/unit\n## 验收映射\n- AC-1 → {names['fe']}\n")
+            light_state = {"task_id":light, "base_branch":"main", "approved_g2":True,
+                           "approved_lane_plan":[{"name":"fe","node":"implement_fe","branch":"light-fe",
+                                                  "scope":[names["fe"]],"lane_instruction":"light fixture"}],
+                           "approved_requirements_text":"## 验收标准\n- AC-1: small behavior\n",
+                           "approved_design_text":light_design}
+            light_state.update(g.implement_node(light_state))
+            previous_calls = len(prompts)
+            light_state.update(g.review_node(light_state))
+            check("已批准且当前门禁覆盖的小改动走轻审", bool(light_state["review_report"]) and len(prompts) == previous_calls)
+            single = light_state["delivery"]
+            records = rd.gates(db, light, single, lambda lane: g._implement_gate_specs(config, lane))
+            check("同一版本和环境且显式启用时可复用实现门禁",
+                  rd.reusable(str(repo), config, single, records, "check-unit"))
+            with patch.dict("os.environ", {"AGENTCODE_FIXTURE_CHANGED":"1"}):
+                check("环境变化强制执行独立门禁", not rd.reusable(str(repo), config, single, records, "check-unit"))
+
+            review_design = light_design.replace("- 审查：轻量 | fe/unit\n", "").replace(
+                "- 门禁证据：AC-1 | fe/unit", "- 独立验收：AC-1 | unit")
+            plan = ws / "g2-design.md"
+            plan.write_text(review_design, encoding="utf-8")
+            proto = ws / "g2-prototype"
+            proto.mkdir()
+            page, note = proto / "index.html", proto / "PROTOTYPE.md"
+            page.write_text('<button id="demo">example</button>', encoding="utf-8")
+            mapping = "## 验收映射\n- AC-1 → 原型演示 | #demo | 点击 | 显示结果"
+            note.write_text(mapping, encoding="utf-8")
+            digest = ledger.artifact_digest([plan, proto])
+            aid = ledger.request_approval(db, light, "G2_design", digest, checkpoint_id="g2-fixture")
+            source = lambda: rd.approved_prototype(db, light, str(plan), str(proto), review_design)
+            check("待审原型不可作为 G2 审查证据", invalid(source))
+            ledger.decide_approval(db, aid, "approved", "fixture reviewer")
+            citation, contents = source()
+            check("原型精确内容、组合摘要与批准检查点一同取证",
+                  contents.strip() == mapping and digest in citation and "g2-fixture" in citation)
+            page.write_text("drift", encoding="utf-8")
+            check("批准后改动原型页面即拒绝组合证据", invalid(source))
+            page.unlink()
+            check("丢失已批准的原型页面即拒绝组合证据", invalid(source))
+            page.write_text('<button id="demo">example</button>', encoding="utf-8")
+
+            result.clear()
+            result.update(verdict="PASS", reason="Approved downstream unit pending", findings=[], criteria=[
+                {"ac":"AC-1", "status":"DEFERRED", "source":"TEST", "ref":"unit", "line":0}])
+            scope = light_state["approved_lane_plan"]
+            head = single["commits"][-1]["commit"]
+            validation = (str(repo), json.dumps(result), single["base"], head, [names["fe"]],
+                          {"AC-1": names["fe"]}, records, {"unit":"check-unit"}, scope, [])
+            check("延期引用必须是 G2 批准的配置门禁",
+                  invalid(lambda: rd.validate(*validation)) and invalid(lambda: rd.validate(
+                      *validation, approved_tests={"AC-1":"acceptance"})))
+            blocked_result = json.dumps(dict(result, verdict="BLOCKED"))
+            check("只有合法延期却返回 BLOCKED 仍按矛盾结论拦截",
+                  invalid(lambda: rd.validate(validation[0], blocked_result, *validation[2:],
+                                              approved_tests={"AC-1":"unit"})))
+            light_state.update(approved_design_text=review_design, design_doc=str(plan), prototype_dir=str(proto))
+            ledger.set_task_status(db, light, "running")
+            light_state.update(g.review_node(light_state))
+            review_text = Path(light_state["review_report"]).read_text(encoding="utf-8")
+            check("默认审查读取批准原型，并传出合法延期与组合摘要",
+                  mapping in prompts[-1] and digest in prompts[-1] and digest in review_text
+                  and light_state["review_deferred_tests"] == {"unit":"check-unit"})
+
+            with patch.object(g, "_delivery_test_specs", return_value=[("unit", "another-command")]), \
+                 patch.object(w, "run_gate") as changed_gate:
+                changed = g.test_node(light_state)
+                check("延期门禁命令变化时阻断并要求重审", not changed["test_report"] and not changed_gate.called)
+            ledger.set_task_status(db, light, "running", node="test")
+            with patch.object(w, "run_gate", return_value=(False, "independent failure")) as run_gate:
+                tested = g.test_node(light_state)
+                check("延期门禁实际独立执行，失败时不出测试回执",
+                      any(call.args[0] == "check-unit" for call in run_gate.call_args_list)
+                      and not tested["test_report"] and not tested["test_receipt"]
+                      and db.execute("SELECT status FROM tasks WHERE id=?", (light,)).fetchone()["status"] == "gate_failed")
+            ledger.set_task_status(db, light, "running", node="deploy")
+            with patch.object(w, "run_gate") as staging:
+                deploy = g.deploy_node(dict(light_state, **tested))
+                check("从部署重跑也不能越过延期的测试证据", not deploy["deploy_report"] and not staging.called
+                      and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? AND gate_name='deploy_deferred_tests' AND passed=0",
+                                 (light,)) == 1)
+        db.close()
+
+
+def retro01(ws: Path):
+    from copy import deepcopy
+    from hashlib import sha256
+    from unittest.mock import patch
+    import memory
+    import retro_eval
+    import retro_evidence as evidence
+    import worker as w
+
+    def rejected(operation):
+        try:
+            operation()
+        except (ValueError, OSError):
+            return True
+        return False
+
+    def evaluate(fixture, payload):
+        reply = json.dumps(payload, ensure_ascii=False)
+        with patch.object(w, "run_codex", return_value=w.WorkerResult(0, reply, 0, reply, final_message=reply)) as worker:
+            report = retro_eval.evaluate(fixture, str(ws), None)
+            report["prompt"] = worker.call_args.args[0]
+            return report
+
+    payload = {"inferences": [{"text":"可能是环境漂移，需要复现", "refs":["gate.be.unit"]}],
+               "pending": [{"text":"复现前一轮失败", "refs":[]}], "actions": [], "candidates": []}
+    skipped = {"label":"skip","skipped":True,"deploy_report":"PASS STALE-STAGING"}
+    done = evaluate(skipped, payload)
+    doc = done["output"]
+    check("旧通过报告无法覆盖 staging 跳过和 G3 未运行",
+          all(c["ok"] for c in done["checks"]) and "staging SKIPPED" in doc and "STALE-STAGING" not in doc)
+    check("Worker 仅接收证据摘要，复盘保留交付提交与原始记录定位",
+          done["head"] not in done["prompt"] and done["head"] in doc
+          and '"staging":["SKIPPED"' in done["prompt"] and '"g3":["NOT_RUN"' in done["prompt"]
+          and "TEST_REPORT.md" not in done["prompt"] and "TEST_REPORT.md" in doc
+          and "AC-1: 导出函数返回 current" in done["prompt"])
+    check("未知根因只出现在推断与待验证中",
+          "可能是环境漂移，需要复现" not in doc.split("## 推断", 1)[0] and "## 待验证" in doc)
+    test = evaluate({"label":"stale","skipped":False,"deploy_report":"PASS","stale":True}, payload)
+    check("旧轮次门禁、测试和 G3 不充当当前事实", "OLD-ONLY-FAILURE" not in test["output"]
+          and "test UNKNOWN" in test["output"] and "g3 UNKNOWN" in test["output"])
+    for bad in (dict(payload, inferences=[{"text":"未知","refs":["GATE-FABRICATED"]}]),
+                dict(payload, facts=[{"text":"根因已验证","refs":["gate.be.unit"]}])):
+        invalid = evaluate(skipped, bad)
+        check("拒绝虚构引用或模型自报事实并保留交付终态", not invalid["checks"][0]["ok"]
+              and invalid["task_status"] == "done" and "复盘证据校验失败" in invalid["output"])
+
+    db = new_db(ws)
+    tid = ledger.create_task(db, "memory fixture")
+    docs = ws / tid / "docs"
+    docs.mkdir(parents=True)
+    run = ledger.start_node_run(db, tid, "retro")
+    item = {"type":"pitfall","scope":"be","text":"Use stable runner.", "applies_when":"BE tests", "refs":["gate.be.unit"]}
+    bundle = {"task":tid,"project":ws.name,"head":"a"*40,"lanes":["be","fe"],"candidates":[item],
+              "evidence":{"gate.be.unit":{"status":"PASS","lane":"be","detail":"fixture"}}}
+    large = deepcopy(bundle)
+    large["evidence"]["gate.be.unit"].update(detail="$ unit\n" + "x" * 1600 + "TAIL", locator="ledger:fixture")
+    large["evidence"]["review.findings"] = {
+        "status": "RECORDED", "detail": "# REVIEW\n## 结论\nPASS\n## AC 证据\n- AC-1\n\n## 建议\n- 核对导出边界",
+    }
+    untouched = deepcopy(large)
+    context = json.loads(evidence.model_context(large))
+    status, excerpt = context["gate.be.unit"]
+    check("长门禁日志只投影限长摘要，完整证据与状态仍用于校验",
+          large == untouched and status == "PASS" and excerpt.startswith("$ unit")
+          and len(excerpt) <= 160 and "TAIL" not in excerpt and "ledger:fixture" not in str(context))
+    check("审查摘要优先保留具体建议", context["review.findings"] == ["RECORDED", "- 核对导出边界"])
+    raw = json.dumps(bundle).encode("utf-8")
+    path = docs / f"RETRO-evidence-{run}.json"
+    path.write_bytes(raw)
+    digest = sha256(raw).hexdigest()
+    ledger.record_gate_result(db, tid, "retro_doc", True, digest, node_run_id=run)
+    db.execute("UPDATE node_runs SET status='done' WHERE id=?", (run,))
+    db.commit()
+    [cid] = memory.enqueue(db, bundle, run, digest, [item])
+    variation = dict(item, text="use  stable runner")
+    check("同范围重复候选仅留一条", memory.enqueue(db,bundle,run,digest,[variation]) == [])
+    check("跨 lane 证据不能证明候选适用", rejected(
+        lambda: memory.enqueue(db,bundle,run,digest,[dict(item,scope="fe")])))
+    check("生成候选等待人工，未批准无法写入项目记忆",
+          memory.deliver(db, ws, force=True)["delivered"] == [] and not (ws/"AGENTS.md").exists())
+    path.write_bytes(b"forged")
+    check("人工审核拒绝变化的来源快照",
+          rejected(lambda: memory.review_candidate(db,ws,cid,"approve","human")))
+    path.write_bytes(raw)
+    memory.review_candidate(db,ws,cid,"approve","human")
+    path.unlink()
+    check("投递前重新验证来源", memory.deliver(db,ws,force=True)["delivered"] == [])
+    path.write_bytes(raw)
+    check("人工审核后保留适用条件且只投递一次",
+          memory.deliver(db,ws,force=True)["delivered"] == [cid]
+          and "BE tests" in (ws/"AGENTS.md").read_text(encoding="utf-8")
+          and not memory.deliver(db,ws,force=True)["delivered"])
+    _enqueue(db,tid,_retro_payload("legacy-unproven"))
+    check("来源无法核验的旧待投递记录留池",
+          memory.deliver(db,ws,force=True)["deferred"] == ["legacy-unproven"])
+    db.close()
+
+
+def design_handoff01(ws: Path):
+    from dataclasses import replace
+    import dashboard as dash
+    import graph as g
+    import worker as w
+
+    g.bind_workspace(ws)
+    db = new_db(ws)
+    _stub_worker()
+    (ws / "project.yaml").write_text("tech_stack:\n  web: apps/web\n  api: apps/api\n", encoding="utf-8")
+    req = ("## 需求\n### 待确认\n未批准选项 PENDING-SAMPLE。\n\n### 已有背景\n" + "业务背景。" * 700
+           + "\n## 验收标准\n- AC-1: 接口提供 exportToken。\n- AC-2: 下载结果为 TAIL-AC-77。\n"
+           "\n## 非目标\n继续沿用权限。\n")
+    task = ledger.create_task(db, "G2 设计交接")
+    approval_doc = (
+        f"# DESIGN · task {task[:8]}\n\n## 文件归属表\n| 路径 | lane |\n| --- | --- |\n"
+        "| apps/api/src/index.ts | be |\n| apps/web/src/app.tsx | fe |\n\n"
+        "## 实现策略\n- 执行顺序：be → fe\n- 接口协作约定 DESIGN-HANDOFF-29。\n\n"
+        "## 验收映射\n- AC-1 → apps/api/src/index.ts\n- AC-2 → apps/web/src/app.tsx\n")
+    for name, expected_error, invalid in (
+        ("倒序", "执行顺序", approval_doc.replace("执行顺序：be → fe", "执行顺序：fe → be")),
+        ("错 lane", "项目目录配置", approval_doc.replace("apps/api/src/index.ts", "apps/web/src/wrong.ts")),
+        ("交叉通配", "具体文件路径", approval_doc.replace("apps/api/src/index.ts", "apps/**")),
+        ("无效映射", "验收映射须指向", approval_doc.replace("AC-2 → apps/web/src/app.tsx", "AC-2 → 无")),
+    ):
+        ok, error = g._design_contract(invalid, req)
+        check(f"设计门禁拒绝{name}", not ok and expected_error in error, error)
+    check("有效双 lane 设计通过", g._design_contract(approval_doc, req)[0])
+
+    received = []
+
+    def capture(prompt, workdir, **kwargs):
+        out = _stub_codex(prompt, workdir, **kwargs)
+        if "You are the Requirements Agent" in prompt:
+            return replace(out, final_message=f"# REQUIREMENTS · task {task[:8]}\n\n{req}")
+        if "You are the Design Agent" in prompt:
+            return replace(out, final_message=approval_doc)
+        if "You are the Implementation Worker" in prompt:
+            received.append(prompt)
+        return out
+
+    w.run_codex = capture
+    runner = dash.ControlRunner(ws, ws / "state.db")
+    runner.execute(task, "start")
+    runner.execute(task, "decide", decision="approved")
+    runner.execute(task, "decide", decision="approved")
+    actual_lanes = db.execute("SELECT name FROM lanes WHERE task_id=? ORDER BY merge_order", (task,))
+    snap = runner._get_app().get_state({"configurable": {"thread_id": task}})
+    approved_plan = snap.values.get("approved_lane_plan") or []
+    check("批准后实际 Worker 按归属顺序执行", [row["name"] for row in actual_lanes] == ["be", "fe"]
+          and [lane["name"] for lane in approved_plan] == ["be", "fe"] and len(received) == 2
+          and f"feat/{task[:8]}-be" in received[0] and f"feat/{task[:8]}-fe" in received[1])
+    check("实际实现请求保留批准的设计、映射和长需求末尾 AC", len(received) == 2 and all(
+        "DESIGN-HANDOFF-29" in prompt and "## 验收映射" in prompt and "TAIL-AC-77" in prompt
+        and "PENDING-SAMPLE" not in prompt for prompt in received))
+    check("G2 主责 AC 和跨 lane 依赖进入实际 Worker 提示",
+          [lane["primary_acs"] for lane in approved_plan] == [["AC-1"], ["AC-2"]]
+          and len(received) == 2 and "## 本 lane 主责 AC\nAC-1" in received[0]
+          and "## 本 lane 主责 AC\nAC-2" in received[1] and "前序 lane：be" in received[1])
+    db.close()
 
 
 def prompt01(ws: Path):
@@ -1747,7 +2837,7 @@ def prompt01(ws: Path):
         "design-gen": tmpl_render("design-gen", task_id="t1",
                                   requirements_content="r", project_context=ctx),
         "prototype-gen": tmpl_render("prototype-gen", task_id="t1", requirements_content="r",
-                                     design_content="d", prototype_dir="p",
+                                     design_content="d",
                                      project_context=ctx),
         "implement-lane": tmpl_render("implement-lane", branch="b", lane_instruction="i",
                                       scope=["apps/api/src/**"], task_id="t1",
@@ -1782,11 +2872,7 @@ def prompt01(ws: Path):
     _stub_worker()
     _write_role_config(ws, deploy_cmd="stub-deploy")
 
-    def _web_git(workdir, *args):
-        if args[:2] == ("status", "--porcelain"):
-            return (0, "M  apps/web/src/app.tsx\n")
-        return (0, "")
-    w.git = _web_git
+    w.git = _stub_lane_git(be="apps/web/src/app.tsx")
 
     t_scope = ledger.create_task(db, "prompt01-scope")
     cfg = {"configurable": {"thread_id": "prompt01-scope"}}
@@ -1805,11 +2891,7 @@ def prompt01(ws: Path):
           and _count(db, "SELECT COUNT(*) FROM operations WHERE task_id=?", (t_scope,)) == 0)
 
     # 4b) 真实 git 的未暂存格式（首列空格）不得被整体 strip 破坏路径解析
-    def _unstaged_git(workdir, *args):
-        if args[:2] == ("status", "--porcelain"):
-            return (0, " M apps/api/src/index.ts\n")
-        return (0, "")
-    w.git = _unstaged_git
+    w.git = _stub_lane_git()
     t_unstaged = ledger.create_task(db, "prompt01-unstaged")
     cfg_u = {"configurable": {"thread_id": "prompt01-unstaged"}}
     app_u = g.build_app(g.make_checkpointer(ws / "graph.db"))
@@ -1818,7 +2900,7 @@ def prompt01(ws: Path):
                              "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}]},
                  cfg_u)
     app_u.invoke(Command(resume="approved"), cfg_u)  # G1
-    app_u.invoke(Command(resume="approved"), cfg_u)  # G2 → implement
+    _approve_g2(ws, app_u, cfg_u)  # G2 → implement
     check("未暂存格式（ M ）路径解析正确：lane 未被误判越界并完成提交",
           _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
                      "AND gate_name='lane_scope' AND passed=0", (t_unstaged,)) == 0
@@ -1876,7 +2958,7 @@ def review01(ws: Path):
                                "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}]},
                    cfg)
         app.invoke(Command(resume="approved"), cfg)  # G1
-        app.invoke(Command(resume="approved"), cfg)  # G2 → implement → review → test → deploy
+        _approve_g2(ws, app, cfg)  # G2 → implement → review → test → deploy
         return app, cfg
 
     _REVIEW_VERDICT["value"] = "PASS"
@@ -1900,7 +2982,7 @@ def review01(ws: Path):
                          "AND gate_name LIKE 'review_%' AND passed=1", (t,)) == 4)
     check("复盘生成 RETRO.md 且 retro_doc 门禁通过",
           (docs / "RETRO.md").is_file()
-          and "## 经验" in (docs / "RETRO.md").read_text(encoding="utf-8")
+          and "test.unit PASS" in (docs / "RETRO.md").read_text(encoding="utf-8")
           and _count(db, "SELECT COUNT(*) FROM gate_results WHERE task_id=? "
                          "AND gate_name='retro_doc' AND passed=1", (t,)) == 1)
     check("任务终态 done", db.execute(
@@ -1923,6 +3005,7 @@ def review01(ws: Path):
 
 def review02(ws: Path):
     import graph as g
+    import worker as w
     from langgraph.types import Command
 
     db = new_db(ws)
@@ -1945,6 +3028,14 @@ def review02(ws: Path):
     (ws / "rules.yaml").write_text("review:\n  rework_attempts: 1\n", encoding="utf-8")
 
     _stub_worker()
+    review_prompts = []
+
+    def capture(prompt, workdir, **kwargs):
+        if "You are the Review Agent" in prompt:
+            review_prompts.append(prompt)
+        return _stub_codex(prompt, workdir, **kwargs)
+
+    w.run_codex = capture
     _PROMPTS.clear()
     _REVIEW_VERDICT["value"] = "FAIL"
     try:
@@ -1956,7 +3047,7 @@ def review02(ws: Path):
                                "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}]},
                    cfg)
         app.invoke(Command(resume="approved"), cfg)  # G1
-        app.invoke(Command(resume="approved"), cfg)  # G2 → implement → review FAIL → 返工
+        _approve_g2(ws, app, cfg)  # G2 → implement → review FAIL → 返工
     finally:
         _REVIEW_VERDICT["value"] = "PASS"
 
@@ -1977,6 +3068,10 @@ def review02(ws: Path):
     check("返工后再次审查（review 二次执行且均失败）",
           _count(db, "SELECT COUNT(*) FROM node_runs WHERE task_id=? AND node_name='review' "
                      "AND status='failed'", (t,)) == 2)
+    check("复审收到前次结论、定位及当前门禁",
+          len(review_prompts) == 2 and "stub defect" not in review_prompts[0]
+          and "stub verdict" in review_prompts[1] and "stub defect" in review_prompts[1]
+          and "be/unit" in review_prompts[1])
 
     # 真实任务 d89a7cc3 暴露的回归场景：历史 review 已超限，手动从 implement 重跑
     # 必须开启新一轮返工预算，而不是被全任务历史 attempt 阻断。
@@ -1996,6 +3091,8 @@ def review02(ws: Path):
           [r["passed"] for r in db.execute(
               "SELECT passed FROM gate_results WHERE task_id=? AND gate_name='review_rework' "
               "ORDER BY id", (t,))] == [1, 0, 1, 0])
+    check("手动重跑从无前次审查上下文的一轮开始",
+          len(review_prompts) == 4 and "stub defect" not in review_prompts[2])
 
 
 # ---------------- NODE-01 规则外置 + test/deploy 租约 + 指定节点重跑 ----------------
@@ -2031,7 +3128,7 @@ def node01(ws: Path):
                            "scope": ["apps/api/src/**"], "prompt": "p", "commit_msg": "m"}]},
                cfg)
     app.invoke(Command(resume="approved"), cfg)  # G1
-    app.invoke(Command(resume="approved"), cfg)  # G2 → implement → review → test → deploy → G3
+    _approve_g2(ws, app, cfg)  # G2 → implement → review → test → deploy → G3
     app.invoke(Command(resume="approved"), cfg)  # G3 → retro
     check("NODE-01 完整链路终态 done", db.execute(
         "SELECT status FROM tasks WHERE id=?", (t,)).fetchone()["status"] == "done")
@@ -2075,7 +3172,9 @@ def node01(ws: Path):
 
 def multi01(ws: Path):
     """C1 验收：平台支持接入独立第二仓库，项目间 state.db / 配置互不泄漏。"""
+    import config_store
     import graph as g
+    import dashboard as dash
     from langgraph.types import Command
 
     # 1) 真实项目发现：projects/ 下应同时注册 river 与 proj-b
@@ -2110,6 +3209,7 @@ def multi01(ws: Path):
             "project: stub\n"
             "budget:\n"
             f"  max_inflight_tasks: {inflight}\n"
+            f"  monthly_quota: {20000 + inflight}\n"
             "tech_stack:\n"
             "  gate_commands:\n"
             "    typecheck: stub-typecheck\n"
@@ -2138,21 +3238,21 @@ def multi01(ws: Path):
          "scope": ["apps/web/src/**"], "prompt": "p", "commit_msg": "m"},
     ]
 
-    def _run_to_done(pws: Path, db, task_id: str) -> str:
+    def _run_to_done(pws: Path, db, task_id: str) -> tuple[str, str]:
         g.RIVER_WS = pws
         g.USAGE_BUFFER = pws / "usage_buffer.jsonl"
         t = ledger.create_task(db, task_id)
         app = g.build_app(g.make_checkpointer(pws / "graph.db"))
-        cfg = {"configurable": {"thread_id": task_id}}
+        cfg = {"configurable": {"thread_id": t}}
         app.invoke({"task_id": t, "requirement": task_id, "base_branch": "base",
                     "lanes": [dict(l) for l in lanes]}, cfg)
         app.invoke(Command(resume="approved"), cfg)  # G1
-        app.invoke(Command(resume="approved"), cfg)  # G2 → implement → review → test → deploy → retro
-        return db.execute("SELECT status FROM tasks WHERE id=?", (t,)).fetchone()["status"]
+        _approve_g2(pws, app, cfg)  # G2 → implement → review → test → deploy → retro
+        return t, db.execute("SELECT status FROM tasks WHERE id=?", (t,)).fetchone()["status"]
 
     try:
-        status_a = _run_to_done(ws_a, db_a, "multi-a")
-        status_b = _run_to_done(ws_b, db_b, "multi-b")
+        id_a, status_a = _run_to_done(ws_a, db_a, "multi-a")
+        id_b, status_b = _run_to_done(ws_b, db_b, "multi-b")
     finally:
         _REVIEW_VERDICT["value"] = "PASS"
 
@@ -2163,9 +3263,9 @@ def multi01(ws: Path):
     a_ids = [r["id"] for r in db_a.execute("SELECT id FROM tasks").fetchall()]
     b_ids = [r["id"] for r in db_b.execute("SELECT id FROM tasks").fetchall()]
     check("项目隔离：proj-a state.db 不含 proj-b 任务",
-          "multi-b" not in a_ids, f"a_ids={a_ids}")
+          a_ids == [id_a] and id_b not in a_ids, f"a_ids={a_ids}")
     check("项目隔离：proj-b state.db 不含 proj-a 任务",
-          "multi-a" not in b_ids, f"b_ids={b_ids}")
+          b_ids == [id_b] and id_a not in b_ids, f"b_ids={b_ids}")
 
     # 5) 配置消费：切换工作区后 budget.max_inflight_tasks 读各自 project.yaml
     g.RIVER_WS = ws_a
@@ -2175,7 +3275,31 @@ def multi01(ws: Path):
     check("proj-b 配置消费：max_inflight_tasks=1",
           g._project_config()["budget"]["max_inflight_tasks"] == 1)
 
-    g.set_project("river")  # 恢复默认
+    # 真实控制台执行入口，复用 A 的缓存图时必须重新绑定工作区。
+    runner_a = dash.ControlRunner(ws_a, ws_a / "state.db")
+    runner_b = dash.ControlRunner(ws_b, ws_b / "state.db")
+    active_a = ledger.create_task(db_a, "项目 A 审批")
+    active_b = ledger.create_task(db_b, "项目 B 审批")
+    try:
+        runner_a.execute(active_a, "start")
+        runner_b.execute(active_b, "start")
+        result = runner_a.execute(active_a, "decide", decision="approved")
+        check("A→B→A 复用图时在 A 继续设计并隔离产物",
+              "G2_design" in result and (ws_a / active_a / "docs" / "DESIGN.md").is_file()
+              and not (ws_b / active_a).exists())
+        runner_a.execute(id_a, "rerun", entry="retro")
+        runner_b.execute(id_b, "rerun", entry="retro")
+        # 配置保存后控制台按相同顺序刷新 B 的运行上下文。
+        config_store.apply_updates(ws_b / "project.yaml", {"budget.monthly_quota": 25000})
+        g.bind_workspace(ws_b)
+        g.refresh_runtime_config()
+        runner_a.execute(id_a, "rerun", entry="retro")
+        check("保存 B 配置后复用 A 重跑图仍使用 A 额度并写 A 账本",
+              g.QUOTA == 20002 and g.USAGE_BUFFER == ws_a / "usage_buffer.jsonl"
+              and _count(db_a, "SELECT COUNT(*) FROM node_runs WHERE task_id=? AND node_name='retro'", (id_a,)) == 3
+              and _count(db_b, "SELECT COUNT(*) FROM node_runs WHERE task_id=? AND node_name='retro'", (id_b,)) == 2)
+    finally:
+        g.set_project("river")
 
 
 # ---------------- EVAL-01 B 层评测机制 ----------------
@@ -2356,6 +3480,71 @@ def kill01(ws: Path):
     check("门禁超时终止进程树（心跳停止）", g1 > 0 and g1 == g2, f"{g1}->{g2}")
 
 
+# ---------------- MODEL-01 逐 Agent 模型路由（完整图执行，stub 不耗真实额度） ----------------
+
+def model01(ws: Path):
+    import graph as g
+    import worker as w
+    from langgraph.types import Command
+
+    db = new_db(ws)
+    g.RIVER_WS = ws
+    g.USAGE_BUFFER = ws / "usage_buffer.jsonl"
+    _stub_worker()
+    _write_role_config(ws, deploy_cmd="stub-deploy")
+    with (ws / "project.yaml").open("a", encoding="utf-8") as fh:
+        fh.write("""model:
+  default: model-fallback
+  degraded: model-degraded
+  strong_roles: [requirements, design, review]
+  roles:
+    requirements: model-requirements
+    design: model-design
+    prototype: model-prototype
+    review: model-review
+    implement: model-implement
+    test: model-test
+    deploy: model-deploy
+    retro: model-retro
+review:
+  codex: true
+retro:
+  generate: true
+""")
+
+    calls: list[str] = []
+    stub_codex = w.run_codex
+
+    def capture_codex(prompt, workdir, **kw):
+        calls.append(kw.get("model"))
+        return stub_codex(prompt, workdir, **kw)
+
+    w.run_codex = capture_codex
+    task_id = ledger.create_task(db, "model01")
+    cfg = {"configurable": {"thread_id": "model01"}}
+    app = g.build_app(g.make_checkpointer(ws / "graph.db"))
+    _role_invoke(ws, app, cfg, task_id)
+    app.invoke(Command(resume="approved"), cfg)  # G3 → retro
+
+    expected = {
+        "requirements": "model-requirements",
+        "design": "model-design",
+        "prototype": "model-prototype",
+        "implement_api": "model-implement",
+        "review": "model-review",
+        "retro": "model-retro",
+    }
+    actual = {row["agent_role"]: row["model"] for row in db.execute(
+        "SELECT agent_role, model FROM cost_ledger WHERE task_id=?", (task_id,))}
+    check("完整图执行中六类 Agent 均使用各自模型并正确入账",
+          all(actual.get(role) == model for role, model in expected.items()), str(actual))
+    check("run_codex 实际收到六类独立模型参数",
+          set(expected.values()).issubset(set(calls)), str(calls))
+    check("test/deploy 保留角色配置但当前不触发 LLM 调用",
+          "model-test" not in calls and "model-deploy" not in calls
+          and "test" not in actual and "deploy" not in actual)
+
+
 CASES = {
     "AC-01": ac01, "AC-02": ac02, "AC-02b": ac02b, "AC-02c": ac02c, "AC-02d": ac02d,
     "AC-02e": ac02e,
@@ -2367,12 +3556,24 @@ CASES = {
     "AC-11": ac11, "AC-12": ac12, "AC-13": ac13, "AC-14": ac14,
     "ROLE-01": role01, "ROLE-02": role02,
     "CONSOLE-01": console01,
+    "APPROVAL-01": approval_flow01,
+    "INTAKE-01": intake_publication01,
     "CONFIG-01": config01,
+    "MODEL-01": model01,
     "PROTOTYPE-01": prototype01,
     "PROMPT-01": prompt01,
+    "PROMPT-CONTRACT-01": prompt_contract01,
+    "PROMPT-CONTEXT-01": prompt_context01,
+    "DESIGN-HANDOFF-01": design_handoff01,
+    "LANE-DELIVERY-01": lane_delivery01,
+    "GATE-FIX-01": gate_fix01,
+    "WORKER-MESSAGE-01": worker_message01,
+    "PROMPT-SCOPE-01": prompt_scope01,
     "EVAL-01": eval01,
     "REVIEW-01": review01,
     "REVIEW-02": review02,
+    "REVIEW-DELIVERY-01": review_delivery01,
+    "RETRO-01": retro01,
     "NODE-01": node01,
     "MULTI-01": multi01,
     "LANE-01": lane01,

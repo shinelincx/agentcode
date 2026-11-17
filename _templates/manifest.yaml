@@ -1,18 +1,31 @@
 # Prompt 模板清单 · A1 模板层
 # SemVer 版本：每次改动模板内容（参数新增/删除/语义变更）必须 bump
-# 参数标记：required=缺失时报错；optional=缺失时 $param 保留在输出中（极少数情况用）
+# 参数标记：required=缺失时报错；optional=缺失时使用 default 或空字符串
 # 渲染入口：platform/templates.py render(name, **params)
 # 逃生口：LANES[].prompt 显式给出时跳过 implement-lane 模板直接使用
 # 1.1.0：统一六段式（Role/Context/Task/Constraints/Output contract/Self-check）；
 #        新增 project_context（渲染期注入项目事实与记忆）；gate-fix 增 failed_files/attempt。
 # 1.2.0：C 层新增 review-diff（自动审查）与 retro-gen（复盘生成）两个模板。
 # 1.3.0：review-diff 增 files_content/gate_results；implement-lane 与 gate-fix 增 workdir_hint（G-02 lane 根 cwd）。
+# 1.4.0：intake 表单精简为 内容+附件+优先级；requirements-gen 语义升级——自由文本原始输入由 Agent
+#        提炼为标准需求规格书（参数不变）。
 
-version: "1.3.0"
+# 1.5.0：补人审上版、原型附件和复审历史，明确审查结论、AC 与门禁修正契约。
+# 1.6.0：G1/G2 提交结构化修订决定；原型返回两份内容由编排器发布。
+# 1.7.0：细化需求待确认项、AC 与混合反馈，分别渲染首稿和修订契约。
+# 1.8.0：设计明确 lane 顺序、文件归属、验证与 G2 修订契约。
+# 1.9.0：原型参考说明、G2 映射与跳过规则。
+# 1.10.0：实现交付校验、G2 主责和既有测试保护。
+# 1.11.0：门禁修正诊断、审批约束与结构化结果。
+# 1.12.0：审查绑定交付提交、批准 AC、门禁和结构化返工。
+# 1.13.0：复盘绑定交付证据并提交独立审核的项目记忆候选。
+# 1.14.0：精简复盘证据摘要和提示词。
+# 1.15.0：默认审查使用 G2 原型验收证据并接续独立验收。
+version: "1.15.0"
 
 templates:
   implement-lane:
-    version: "1.2.0"
+    version: "1.4.0"
     file: "prompts/implement-lane.tmpl"
     purpose: "Worker lane 实现指令（be/fe 共用外壳，lane_instruction 为自由文本）"
     params:
@@ -24,51 +37,60 @@ templates:
       workdir_hint: { required: false, desc: "Worker 工作目录说明（lane 根 cwd 与前缀去除规则）" }
 
   gate-fix:
-    version: "1.2.0"
+    version: "1.5.0"
     file: "prompts/gate-fix.tmpl"
     purpose: "门禁失败修正指令（graph.py 修正循环用）"
     params:
       gate_cmd: { required: true, desc: "失败的门禁命令（如 npm run typecheck）" }
-      gate_output_tail: { required: true, desc: "门禁输出尾部（默认 1200 字符）" }
+      gate_name: { required: false, default: "未声明", desc: "门禁名称" }
+      gate_cwd: { required: false, default: "仓库根目录", desc: "编排器执行门禁的工作目录" }
+      gate_output_tail: { required: true, desc: "进程分类、退出状态、首段诊断及输出尾部" }
       failed_files: { required: true, desc: "本 lane 当前改动文件列表（逗号分隔）" }
-      attempt: { required: true, desc: "当前节点尝试次数（node_runs 计数 +1）" }
+      lane_instruction: { required: false, default: "无", desc: "已批准的 lane 目标、依赖及 AC" }
+      approved_tests: { required: false, default: "无", desc: "本 lane 已获 G2 批准的既有测试修改" }
+      attempt: { required: true, desc: "当前门禁修正轮次，从 1 开始" }
+      attempt_limit: { required: false, default: "未声明", desc: "单个门禁的修正轮数上限" }
+      scope: { required: false, default: "未声明", desc: "允许改动的 lane 文件范围" }
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
       workdir_hint: { required: false, desc: "Worker 工作目录说明（lane 根 cwd 与前缀去除规则）" }
 
   requirements-gen:
-    version: "1.3.0"
+    version: "1.7.0"
     file: "prompts/requirements-gen.tmpl"
-    purpose: "A2 需求节点 Agent 产出 REQUIREMENTS.md"
+    purpose: "A2 需求节点 Agent：自由文本原始输入 → 标准 REQUIREMENTS.md 规格书"
     params:
-      raw_requirement: { required: true, desc: "原始需求描述（一句话或一段）" }
-      attachments: { required: false, default: "无", desc: "参考图片绝对路径列表（codex -i 同步送入）" }
-      rejection_feedback: { required: false, default: "无", desc: "上次人工驳回理由（R1：Agent 据此判断是否修订）" }
+      raw_requirement: { required: true, desc: "原始需求内容（自由文本，含参考图片清单）" }
+      attachments: { required: false, default: "无", desc: "参考图片提示（codex -i 传入实际图片）" }
+      rejection_feedback: { required: false, desc: "上次人工驳回理由（仅修订时注入）" }
+      previous_document: { required: false, desc: "人工驳回时的上一版 REQUIREMENTS.md，存在时选择修订契约" }
       task_id: { required: true, desc: "任务 id" }
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
 
   design-gen:
-    version: "1.2.0"
+    version: "1.8.0"
     file: "prompts/design-gen.tmpl"
     purpose: "A2 设计节点 Agent 产出 DESIGN.md"
     params:
       requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
-      rejection_feedback: { required: false, default: "无", desc: "上次人工驳回理由（R1：Agent 据此判断是否修订）" }
+      rejection_feedback: { required: false, desc: "上次 G2 驳回理由（仅修订时注入）" }
+      previous_document: { required: false, desc: "人工驳回时的上一版 DESIGN.md，存在时选择修订契约" }
       task_id: { required: true, desc: "任务 id" }
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
 
   prototype-gen:
-    version: "1.1.0"
+    version: "1.4.0"
     file: "prompts/prototype-gen.tmpl"
     purpose: "原型/UI 角色 Agent 产出 index.html + PROTOTYPE.md（专属原型目录）"
     params:
       requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
       design_content: { required: true, desc: "DESIGN.md 全文" }
-      prototype_dir: { required: true, desc: "原型输出目录（Agent 的写入范围）" }
+      attachments: { required: false, default: "无", desc: "按实际输入顺序编号的参考图及缺失说明" }
+      prototype_feedback: { required: false, default: "无", desc: "当前 G2 界面返工反馈" }
       task_id: { required: true, desc: "任务 id（前 8 位）" }
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
 
   review-diff:
-    version: "1.2.1"
+    version: "1.5.0"
     file: "prompts/review-diff.tmpl"
     purpose: "自动审查（review.codex=true）：按需求/设计审交付 diff，PASS/FAIL 决定是否进入测试"
     params:
@@ -79,16 +101,15 @@ templates:
       project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }
       files_content: { required: false, desc: "变更文件的当前完整内容（diff 未覆盖的行也需核验 AC 时使用）" }
       gate_results: { required: false, desc: "implement 阶段门禁结果（typecheck/unit 等，Markdown 表格）" }
+      previous_review: { required: false, default: "无", desc: "同一返工轮次的上一轮结论、问题和门禁结果" }
+      delivery_context: { required: false, default: "无", desc: "固定提交和明确列出的取证缺口" }
+      prototype_evidence: { required: false, default: "无", desc: "经 G2 组合摘要校验的原型说明与验收映射" }
+      downstream_gates: { required: false, default: "无", desc: "独立测试门禁名称" }
 
   retro-gen:
-    version: "1.2.0"
+    version: "1.5.0"
     file: "prompts/retro-gen.tmpl"
     purpose: "复盘生成（retro.generate=true）：产出 RETRO.md（不影响交付终态）"
     params:
-      requirements_content: { required: true, desc: "REQUIREMENTS.md 全文" }
-      design_content: { required: true, desc: "DESIGN.md 全文" }
-      test_report: { required: true, desc: "TEST_REPORT.md 全文或（未生成）" }
-      deploy_report: { required: true, desc: "DEPLOY_REPORT.md 全文或（未生成）" }
-      change_summary: { required: true, desc: "交付改动摘要（文件清单 + diff stat）" }
+      evidence_bundle: { required: true, desc: "按证据 ID 索引的状态和简短摘要" }
       task_id: { required: true, desc: "任务 id（前 8 位）" }
-      project_context: { required: true, desc: "渲染期注入：技术栈/目录/门禁命令/项目记忆条目" }

@@ -2,14 +2,27 @@
 
 /* 设置页：角色 / 预算 / 门禁 / 部署 / 审批 / 路径（GET/POST /api/config，按项目） */
 
-const SettingsView = {
-  cfg: null, meta: {}, editable: false, file: '', loadingFor: '',
+const AGENT_MODELS = [
+  ['requirements', '需求 Agent · requirements', '原始需求与图片 → 标准需求'],
+  ['design', '设计 Agent · design', '架构方案、文件归属与验收映射'],
+  ['prototype', '原型 Agent · prototype', '界面原型与验收映射'],
+  ['review', '审查 Agent · review', '独立代码审查（review.codex 启用时）'],
+  ['implement', '实现 Agent · implement', '前后端 lane 实现与门禁修复'],
+  ['test', '测试 Agent · test', '预留：当前只执行测试命令，不调用 LLM'],
+  ['deploy', '部署 Agent · deploy', '预留：当前只执行部署命令，不调用 LLM'],
+  ['retro', '复盘 Agent · retro', '复盘生成（retro.generate 启用时）'],
+];
 
-  async load(project) {
-    this.loadingFor = project;
+const SettingsView = {
+  cfg: null, meta: {}, editable: false, file: '', loadVersion: 0,
+
+  async load() {
+    const context = viewContext();
+    const version = ++this.loadVersion;
+    this.editable = false;
     $('view').innerHTML = '<div class="empty">加载配置…</div>';
     const { ok, data } = await getJSON('/api/config');
-    if (this.loadingFor !== state.project) return;  // 已切到其他项目
+    if (!sameView(context) || version !== this.loadVersion) return;
     if (!ok) {
       $('view').innerHTML = `<div class="empty">${esc(data.error || '配置读取失败')}</div>`;
       return;
@@ -51,6 +64,16 @@ const SettingsView = {
         value="${esc(v ?? '')}" ${dis}></label>`;
   },
 
+  agentModel(role, label, hint) {
+    const configured = this.get('model.roles');
+    if (configured && Object.prototype.hasOwnProperty.call(configured, role)) {
+      return this.field(`model.roles.${role}`, label, { hint });
+    }
+    return `<label class="field"><span>${esc(label)}
+      <span class="hint">${esc(hint)}；未声明独立配置，继承默认模型</span></span>
+      <input value="${esc(this.get('model.default') || '')}" disabled></label>`;
+  },
+
   checks(group, label, options) {
     const cur = this.get(group) || [];
     const dis = this.editable ? '' : 'disabled';
@@ -84,10 +107,17 @@ const SettingsView = {
           this.field('executor.primary', '主执行器', { options: m.executors || [] })
           + this.field('executor.fallback', '备用执行器', { options: m.executors || [] })
           + this.field('executor.codex_home', 'Codex 凭据目录', { hint: '须含 auth.json' }))}
-        ${this.section('模型路由 · model',
-          this.field('model.default', '默认模型')
-          + this.field('model.degraded', '降级模型')
+        ${this.section('模型路由 · 全局策略',
+          this.field('model.default', '默认模型', { hint: '角色未单独配置时的回退' })
+          + this.field('model.degraded', '降级模型', { hint: 'DEGRADED 时用于非强角色' })
           + this.checks('model.strong_roles', '永不降级的角色', m.roles || []))}
+        ${this.section('Agent 独立模型 · model.roles',
+          '<div class="field full"><span>生效规则</span><div class="hint">'
+          + 'NORMAL / ALERT 使用各角色独立模型；DEGRADED 时非强角色切换为全局降级模型，'
+          + '强角色继续使用自己的模型。未声明的角色继承默认模型；已声明配置须填写非空模型名。'
+          + '</div></div>'
+          + AGENT_MODELS.map(([role, label, hint]) => this.agentModel(role, label, hint)).join(''),
+          '<span class="meta-text">按当前项目保存</span>')}
         ${this.section('预算边界 · budget',
           this.field('budget.monthly_quota', '月度配额（calls）', { type: 'number' })
           + this.field('budget.max_usage_per_task', '单任务上限 U', { type: 'number' })
@@ -156,15 +186,17 @@ const SettingsView = {
 
   async submit() {
     if (!this.editable) return;
+    const context = viewContext();
     const updates = this.collect();
     const keys = Object.keys(updates);
     if (!keys.length) { this.msg('没有检测到变更'); return; }
     this.msg('保存中…');
     const { ok, data } = await postJSON('/api/config', { updates, by: 'console' });
+    if (!sameView(context)) return;
     if (!ok) { this.msg('保存失败：' + (data.error || ''), 'jbad'); return; }
     this.msg(`已保存 ${data.changed.length} 项：${data.changed.join(', ')}`
       + (data.runtime_refreshed ? '（运行时已刷新）' : '（运行时刷新失败，需重启）'), 'jok');
-    await this.load(state.project);
+    await this.load();
   },
 };
 

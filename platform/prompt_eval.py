@@ -4,7 +4,7 @@
   1) 渲染层（默认，零成本）：按 _templates/evals/golden.yaml 渲染模板，
      断言六段结构、契约章节、scope/约束文案、prompt 长度（成本观察）。
   2) 产出层（`--live`，消耗真实 codex）：仅运行带 output_assert 的用例，
-     抽取 Markdown 后断言章节完整与 AC 数量——即「模型是否真的按契约写」。
+     核对 Markdown 或结构化修订后的文档。用例可附参考图片。
 
 通过率写入 JSON 报告（--json 输出，--out 落盘）；任务模板漂移用 --task-dir 检查。
 """
@@ -61,11 +61,47 @@ def _check_text(text: str, spec: dict) -> list[dict]:
     return checks
 
 
+def _check_design(doc: str, requirements: str, spec: dict, tech_stack: dict) -> tuple[list[dict], list[dict]]:
+    """走设计消费者，核对实际顺序、范围、原型和传入实现的内容。"""
+    import graph as g
+
+    with tempfile.TemporaryDirectory(prefix="design-eval-", ignore_cleanup_errors=True) as temp:
+        workspace = Path(temp)
+        req_path, design_path = workspace / "REQUIREMENTS.md", workspace / "DESIGN.md"
+        req_path.write_text(requirements, encoding="utf-8")
+        design_path.write_text(doc, encoding="utf-8")
+        (workspace / "project.yaml").write_text(yaml.safe_dump({"tech_stack": tech_stack}), encoding="utf-8")
+        prior_workspace = g.RIVER_WS
+        try:
+            g.bind_workspace(workspace)
+            ok, detail = g._design_contract(doc, requirements)
+            checks = [{"desc": "实际设计门禁", "ok": ok, "detail": detail}]
+            lanes = g._lanes_from_design(design_path, req_path, "eval") if ok else []
+            prototype, why = g._needs_prototype(doc, requirements)
+        finally:
+            g.bind_workspace(prior_workspace)
+    order = [lane["name"] for lane in lanes]
+    scopes = {lane["name"]: lane["scope"] for lane in lanes}
+    if "order" in spec:
+        checks.append({"desc": "实际 lane 执行顺序", "ok": order == spec["order"], "detail": repr(order)})
+    if "scope" in spec:
+        checks.append({"desc": "实际 lane 文件范围", "ok": scopes == spec["scope"], "detail": repr(scopes)})
+    if "prototype" in spec:
+        checks.append({"desc": "实际原型触发", "ok": prototype is spec["prototype"], "detail": why})
+    instructions = {lane["name"]: lane["lane_instruction"] for lane in lanes}
+    for lane, lane_spec in (spec.get("lanes") or {}).items():
+        for check in _check_text(instructions.get(lane, ""), lane_spec):
+            checks.append({**check, "desc": f"{lane} 实现指令 {check['desc']}"})
+    return checks, lanes
+
+
 def evaluate_case(case: dict, *, live: bool = False, workdir: str | None = None,
-                  codex_home: str | None = None, timeout: int = 600) -> dict:
+                  codex_home: str | None = None, timeout: int = 600, lane_patch: bool = False) -> dict:
     """渲染 + 断言单个用例；live 且配置了 output_assert 时追加模型产出断言。"""
     params = dict(case.get("params") or {})
     params.setdefault("project_context", DEFAULT_CONTEXT)
+    if requirements_file := case.get("requirements_file"):
+        params["requirements_content"] = (EVAL_DIR / requirements_file).read_text(encoding="utf-8")
     prompt = templates.render(case["template"], **params)
     result = {
         "id": case["id"], "template": case["template"], "mode": "render",
@@ -73,30 +109,94 @@ def evaluate_case(case: dict, *, live: bool = False, workdir: str | None = None,
         "checks": _check_text(prompt, case.get("assert") or {}),
     }
     spec = case.get("output_assert")
+    if live and (fixture := case.get("retrospective")):
+        import retro_eval
+
+        evidence = retro_eval.evaluate(fixture, workdir, codex_home)
+        result.update(mode="live", tokens=evidence["tokens"], retrospective=evidence)
+        result["checks"] += evidence["checks"]
+        result["passed"] = all(c["ok"] for c in result["checks"])
+        return result
+    if live and (fixture := case.get("implementation")):
+        import lane_eval
+
+        evidence = lane_eval.evaluate(fixture, workdir, codex_home, model_patch=lane_patch)
+        result.update(mode="live", tokens=evidence["tokens"], implementation=evidence)
+        result["checks"] += evidence["checks"]
+        result["passed"] = all(c["ok"] for c in result["checks"])
+        return result
     if live and spec:
         import graph as g
+        import prompt_output
         import worker as w
         work = Path(workdir or tempfile.mkdtemp(prefix="prompt-eval-"))
         work.mkdir(parents=True, exist_ok=True)
-        r = w.run_codex(prompt, str(work), codex_home=codex_home, timeout=timeout)
-        doc = g._extract_markdown(r.output)
+        images = [str(EVAL_DIR / path) for path in case.get("images", [])]
+        previous = params.get("previous_document")
+        is_prototype = case["template"] == "prototype-gen"
+        schema = prompt_output.PROTOTYPE_SCHEMA if is_prototype else (
+            prompt_output.REVISION_SCHEMA if previous else None)
+        r = w.run_codex(prompt, str(work), codex_home=codex_home, timeout=timeout, sandbox="read-only",
+                        images=images, output_schema=schema)
         checks = [{"desc": "codex 退出码 0", "ok": r.returncode == 0,
                    "detail": (r.report or "")[-200:]}]
+        doc = ""
+        if r.ok and is_prototype:
+            try:
+                contents = prompt_output.prototype_contents(r.message)
+                error = g._prototype_errors(contents, params["requirements_content"])
+                checks.append({"desc": "原型产物和 AC 门禁", "ok": not error, "detail": error})
+                doc = contents["PROTOTYPE.md"]
+                result["html"] = contents["index.html"]
+                if not error and "preview" in spec:
+                    from prototype_preview import check_preview
+
+                    checks += check_preview(contents["index.html"], spec["preview"])
+            except Exception as exc:
+                checks.append({"desc": "原型文件或预览执行", "ok": False, "detail": str(exc)[:500]})
+        elif r.ok:
+            doc = r.message if case["template"] == "requirements-gen" else g._extract_markdown(r.message)
+        if r.ok and previous:
+            try:
+                decision, reason, doc = prompt_output.apply_revision(r.message, previous)
+            except ValueError as exc:
+                checks.append({"desc": "应用结构化修订", "ok": False, "detail": str(exc)})
+                doc = ""
+            else:
+                revision = spec.get("revision") or {}
+                if "decision" in revision:
+                    checks.append({"desc": "修订决定", "ok": decision == revision["decision"], "detail": decision})
+                if "old_lines" in revision:
+                    edits = json.loads(r.message)["edits"]
+                    old_lines = [edit["old_line"] for edit in edits]
+                    checks.append({"desc": "只编辑指定原稿行", "ok": old_lines == revision["old_lines"],
+                                   "detail": repr(old_lines)})
+                checks += _check_text(reason, revision.get("reason") or {})
         checks += _check_text(doc, spec)
+        for heading, section_spec in (spec.get("sections") or {}).items():
+            for check in _check_text(g._section(doc, heading), section_spec):
+                checks.append({**check, "desc": f"{heading} {check['desc']}"})
+        if design_spec := spec.get("design"):
+            tech_stack = case.get("tech_stack", {"web": "apps/web", "api": "apps/api"})
+            design_checks, lanes = _check_design(doc, params["requirements_content"], design_spec, tech_stack)
+            checks += design_checks
+            result["lane_plan"] = lanes
         result.update({"mode": "live", "checks": checks,
-                       "tokens": r.tokens, "output_chars": len(doc)})
+                       "tokens": r.tokens, "output_chars": len(doc), "output": doc})
+        if previous:
+            result["revision_message"] = r.message
     result["passed"] = all(c["ok"] for c in result["checks"])
     return result
 
 
 def run_eval(only: str = "", *, live: bool = False, workdir: str | None = None,
-             codex_home: str | None = None) -> dict:
+             codex_home: str | None = None, lane_patch: bool = False) -> dict:
     """运行全部（或 --only 指定）用例，返回带通过率的报告字典。"""
     cases = load_cases()
     if only:
         wanted = {s.strip() for s in only.split(",") if s.strip()}
         cases = [c for c in cases if c["id"] in wanted]
-    results = [evaluate_case(c, live=live, workdir=workdir, codex_home=codex_home)
+    results = [evaluate_case(c, live=live, workdir=workdir, codex_home=codex_home, lane_patch=lane_patch)
                for c in cases]
     total = len(results)
     passed = sum(1 for r in results if r["passed"])
@@ -146,6 +246,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--json", action="store_true", help="输出 JSON 报告")
     ap.add_argument("--verbose", action="store_true", help="打印每条断言")
     ap.add_argument("--live", action="store_true", help="调用真实 codex 校验产出结构")
+    ap.add_argument("--lane-patch", action="store_true", help="实现黄金用例由模型返回补丁，评测写入临时仓库")
     ap.add_argument("--codex-home", default=None, help="live 模式的 CODEX_HOME（隔离凭据）")
     ap.add_argument("--workdir", default=None, help="live 模式的工作目录（默认临时目录）")
     ap.add_argument("--out", default=None, help="把 JSON 报告写到指定路径")
@@ -161,7 +262,7 @@ def main(argv: list[str]) -> int:
         return 0 if drift["ok"] else 1
 
     report = run_eval(args.only, live=args.live,
-                      workdir=args.workdir, codex_home=args.codex_home)
+                      workdir=args.workdir, codex_home=args.codex_home, lane_patch=args.lane_patch)
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)

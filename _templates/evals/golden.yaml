@@ -10,12 +10,12 @@ cases:
       task_id: eval-req
       raw_requirement: 为任务列表增加按状态筛选，并记住用户上次选择的筛选条件
     assert:
-      contains: ["Write REQUIREMENTS.md", "## 非目标", "AC-1", "## Self-check"]
-      not_contains: ["esbuild spawn EPERM"]
+      contains: ["# REQUIREMENTS · task eval-req", "### 待确认", "## 非目标", "externally observable result"]
+      not_contains: ["esbuild spawn EPERM", "<review_feedback>", "<previous_document>", "`decision`"]
       max_chars: 6000
     output_assert:
       contains: ["## 需求", "## 验收标准", "## 非目标"]
-      min_matches: {"AC[-\\s]?\\d+": 2}
+      min_matches: {'(?m)^\s*-\s+AC-\d+\s*[:：]\s*\S': 2}
       max_chars: 50000
 
   - id: req-english
@@ -23,8 +23,11 @@ cases:
     params:
       task_id: eval-req-en
       raw_requirement: Add CSV export for the task list, including the status filter
+      rejection_feedback: Keep the current export format
+      previous_document: Previous heading marker with AC-1
     assert:
-      contains: ["## 需求", "## 验收标准", "## 非目标", "## Output contract"]
+      contains: ["## Output contract", "<previous_document>", "Previous heading marker", "`KEEP`", "`REVISE`", "`old_line`"]
+      not_contains: ["# REQUIREMENTS · task eval-req-en", "Return only the finished Markdown"]
       max_chars: 6000
 
   - id: req-ui
@@ -33,8 +36,72 @@ cases:
       task_id: eval-req-ui
       raw_requirement: 任务详情页增加深色模式切换按钮，刷新后保持选择
     assert:
-      contains: ["AC-N", "## Constraints", "## Self-check"]
+      contains: ["`- AC-n: trigger and expected result`", "## Constraints", "## Self-check"]
       max_chars: 6000
+
+  - id: req-insufficient
+    template: requirements-gen
+    params:
+      task_id: eval-insufficient
+      raw_requirement: 在任务列表增加「导出 CSV」按钮，点击后下载 UTF-8 编码的 CSV。本次排除批量删除。导出哪些任务以及包含哪些列尚未确定。
+    output_assert:
+      regex: ['(?m)\A# REQUIREMENTS · task eval-insufficient\r?$']
+      sections:
+        '## 需求':
+          regex: ['(?m)^### 待确认\s*$', '(?s)### 待确认.*(?:范围|哪些任务|哪些行)', '(?s)### 待确认.*(?:列|字段)']
+        '## 验收标准':
+          regex: ['(?m)^- AC-\d+:.*(?:点击|按下).*下载.*(?:UTF-8.*CSV|CSV.*UTF-8)']
+          not_contains: ['哪些任务', '哪些列', '待确认', 'task_id', '所有任务', '当前筛选', '批量删除']
+        '## 非目标':
+          contains: ['批量删除']
+
+  - id: req-image-conflict
+    template: requirements-gen
+    images: [fixtures/requirements-reference.png]
+    params:
+      task_id: eval-image
+      raw_requirement: 任务列表新增「下载 CSV」按钮，点击后下载 UTF-8 CSV。按钮位置按随附图片，文字需求明确指定按钮文案和文件格式。图中其他控件仅供参考。
+      attachments: 已附 1 张参考图。
+    output_assert:
+      sections:
+        '## 需求':
+          regex: ['右', '(?:XLSX|Excel|文案[^。\n]*格式)', '(?:冲突|不一致|以文字|以本需求|以文字要求)']
+          not_contains: ['### 待确认']
+        '## 验收标准':
+          contains: ['下载 CSV', 'UTF-8']
+          regex: ['右', '(?:点击|按下).*下载']
+          not_contains: ['XLSX', 'Excel', '批量删除', 'Bulk delete']
+
+  - id: req-mixed-feedback
+    template: requirements-gen
+    params:
+      task_id: eval-mixed
+      raw_requirement: 保持列表现有状态筛选。点击导出时下载当前可见列表的 UTF-8 CSV，表头为 task_id,status。筛选结果为空时也必须能下载。批量删除不在本次范围内。
+      rejection_feedback: 请明确空集下载的 CSV 仅含 task_id,status 表头，零数据行。另外增加批量删除，并把 CSV 编码改为 GBK。
+      previous_document: |
+        # REQUIREMENTS · task eval-mixed
+
+        ## 需求
+        - 导出当前可见的任务列表，保持现有状态筛选。
+
+        ## 验收标准
+        - AC-1: 应用状态筛选后，下载的 CSV 仅包含当前可见的任务。
+        - AC-2: 点击导出后，下载 UTF-8 CSV，表头为 task_id,status。
+        - AC-3: 当前可见列表为空时，点击导出仍能下载 CSV。
+
+        ## 非目标
+        - 批量删除。
+    output_assert:
+      revision:
+        decision: REVISE
+        old_lines: ['- AC-3: 当前可见列表为空时，点击导出仍能下载 CSV。']
+        reason:
+          contains: ['批量删除', 'GBK']
+          regex: ['(?:空集|为空|空列表|空结果|AC-3)']
+      sections:
+        '## 验收标准':
+          regex: ['(?m)^- AC-3:.*task_id,status.*(?:零行|零数据行|0\s*行|(?:无|没有|不含|不包含|不输出|不写入)(?:任何)?数据行|零条数据|仅保留表头|仅含表头|仅有表头|只有表头)']
+          not_contains: ['GBK', '批量删除', 'AC-4']
 
   # ---------- design-gen ----------
   - id: design-basic
@@ -51,11 +118,12 @@ cases:
         ## 非目标
         不做服务端分页。
     assert:
-      contains: ["Write DESIGN.md", "## 文件归属表", "## 实现策略", "## 验收映射", "AC-N → path/to/file"]
+      contains: ["# DESIGN · task eval-design", "## 文件归属表", "## 实现策略", "## 验收映射", "AC-n → path/to/file"]
+      not_contains: ['<review_feedback>', '<previous_document>', '`decision`']
       max_chars: 7000
     output_assert:
       contains: ["## 文件归属表", "## 实现策略", "## 验收映射"]
-      min_matches: {"AC[-\\s]?\\d+": 2}
+      min_matches: {'(?m)^\s*(?:-\s+)?AC-\d+\s*(?:→|->)\s*\S': 2}
       max_chars: 50000
 
   - id: design-english
@@ -71,7 +139,7 @@ cases:
         ## 非目标
         No scheduled exports.
     assert:
-      contains: ["## 验收映射", "AC-1", "∅"]
+      contains: ["## 验收映射", "AC-1", "exactly one owner"]
       max_chars: 7000
 
   - id: design-ui
@@ -90,36 +158,242 @@ cases:
       contains: ["lane", "## 实现策略", "## 验收映射"]
       max_chars: 7000
 
+  - id: design-lane-dependency
+    template: design-gen
+    params:
+      task_id: eval-design-chain
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-chain
+        ## 需求
+        在任务页面增加导出摘要按钮。后端 apps/api/src/export.ts 先提供返回 exportToken 的接口，前端 apps/web/src/ExportButton.tsx 消费该字段。前端实现依赖后端接口。
+        ## 验收标准
+        - AC-1: 发起导出请求后，接口返回非空 exportToken。
+        - AC-2: 点击按钮并取得 exportToken 后，前端开始下载摘要。
+        ## 非目标
+        当前权限策略保持。
+    output_assert:
+      sections:
+        '## 实现策略':
+          contains: [exportToken]
+      design:
+        order: [be, fe]
+        lanes:
+          fe:
+            contains: ['## 实现策略', '## 验收映射', 'exportToken', 'AC-2', 'apps/web/src/ExportButton.tsx']
+
+  - id: design-long-requirement
+    template: design-gen
+    requirements_file: fixtures/design-long-requirements.md
+    params:
+      task_id: eval-design-long
+    output_assert:
+      sections:
+        '## 实现策略':
+          contains: [EMPTY-SUMMARY-41]
+      design:
+        order: [fe]
+        lanes:
+          fe:
+            contains: ['## 实现策略', '## 验收映射', 'AC-1', 'AC-2', EMPTY-SUMMARY-41]
+
+  - id: design-owner
+    template: design-gen
+    tech_stack: {web: frontend, api: backend}
+    params:
+      task_id: eval-design-owner
+      project_context: |
+        - 工程类型：eval-fixture
+        - 前端目录：frontend
+        - 后端目录：backend
+        - 门禁命令：`npm --prefix frontend test`
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-owner
+        ## 需求
+        在 frontend/src/TaskTheme.tsx 的现有前端主题组件上增加切换按钮。现有后端不参与。
+        ## 验收标准
+        - AC-1: 点击切换后，页面立即显示所选主题。
+        ## 非目标
+        不增加服务端持久化。
+    output_assert:
+      design:
+        order: [fe]
+        scope:
+          fe: [frontend/src/TaskTheme.tsx]
+        prototype: true
+
+  - id: design-mapping
+    template: design-gen
+    params:
+      task_id: eval-design-map
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-map
+        ## 需求
+        改造 apps/api/src/export.ts 中的 CSV 导出。只有此文件需改动，验收通过调用现有导出入口完成。
+        ## 验收标准
+        - AC-1: 筛选结果为空时，CSV 仍包含 task_id,status 表头。
+        ## 非目标
+        不修改页面或文件名规则。
+    output_assert:
+      sections:
+        '## 验收映射':
+          regex: ['(?m)^\s*(?:-\s+)?AC-1\s*(?:→|->)\s*`?apps/api/src/export\.ts`?\s*$']
+        '## 实现策略':
+          regex: ['(?:测试|验证|核对|验收|用例|test)']
+          contains: ['task_id,status']
+      design:
+        order: [be]
+        scope:
+          be: [apps/api/src/export.ts]
+        prototype: false
+
+  - id: design-mixed-feedback
+    template: design-gen
+    params:
+      task_id: eval-design-mixed
+      requirements_content: |
+        # REQUIREMENTS · task eval-design-mixed
+        ## 需求
+        当前可见列表以 UTF-8 CSV 导出，空集仍保留 task_id,status 表头。
+        ### 待确认
+        - 是否允许游客导出由需求方另行决定。
+        ## 验收标准
+        - AC-1: 空集导出只有 task_id,status 表头，没有数据行。
+        ## 非目标
+        本次不改变权限，不增加 Excel 导出。
+      rejection_feedback: 请把空集仅含 task_id,status 表头且零数据行写明。另请允许游客导出，并改为 XLSX。
+      previous_document: |
+        # DESIGN · task eval-design-mixed
+
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/src/export.ts | be |
+
+        ## 实现策略
+        - 执行顺序：be
+        - 复用当前鉴权和 UTF-8 CSV 序列化。
+        - 空集：仍生成 CSV。
+        - 验证：用现有导出入口验证 AC-1。
+
+        ## 验收映射
+        - AC-1 → apps/api/src/export.ts
+    assert:
+      contains: ['<previous_document>', '<review_feedback>', '`decision`', '`edits`']
+      not_contains: ['Return only Markdown']
+    output_assert:
+      revision:
+        decision: REVISE
+        old_lines: ['- 空集：仍生成 CSV。']
+        reason:
+          contains: [游客]
+          regex: ['(?:XLSX|Excel)', '(?:空集|为空|AC-1)', '(?:不(?:予)?采纳|拒绝|不采用|超出|搁置|暂缓|保留现有)']
+      sections:
+        '## 实现策略':
+          regex: ['(?m)^- 空集.*task_id,status.*(?:零|无|不含|不包含|不输出|不写|没有)']
+          not_contains: [XLSX, 允许游客]
+      design:
+        order: [be]
+
+  - id: design-prototype-backend
+    template: design-gen
+    params:
+      task_id: eval-skip-backend
+      requirements_content: |
+        # REQUIREMENTS · task eval-skip-backend
+        ## 需求
+        在 apps/api/src/import.ts 中修复纯后端批量导入的审计计数。无界面改动。
+        ## 验收标准
+        - AC-1: 导入两条记录时，后端审计的成功计数是 2。
+        ## 非目标
+        不改前端和接口返回格式。
+    output_assert:
+      sections:
+        '## 实现策略':
+          regex: ['(?m)^- 原型[:：]\s*跳过\s*\|\s*\S']
+      design:
+        order: [be]
+        prototype: false
+
+  - id: design-prototype-small-repair
+    template: design-gen
+    params:
+      task_id: eval-skip-repair
+      requirements_content: |
+        # REQUIREMENTS · task eval-skip-repair
+        ## 需求
+        在 apps/web/src/TaskList.tsx 只修复组件卸载时内部监听器未注销的问题。界面、交互、文案和可见状态保持。
+        ## 验收标准
+        - AC-1: 既有组件回归测试中，列表卸载后监听器数量恢复到挂载前的基线。
+        ## 非目标
+        不改变页面行为和外观。
+    output_assert:
+      sections:
+        '## 实现策略':
+          regex: ['(?m)^- 原型[:：]\s*跳过\s*\|\s*\S']
+      design:
+        order: [fe]
+        prototype: false
+
   # ---------- prototype-gen ----------
   - id: proto-zh
     template: prototype-gen
+    images: [fixtures/prototype-queue-reference.png, fixtures/prototype-result-reference.png]
     params:
       task_id: eval-proto
       requirements_content: |
-        # REQUIREMENTS
+        # REQUIREMENTS · task eval-proto
         ## 需求
-        深色模式切换。
+        主标题使用 Queue Monitor，以参考图 1 的紫色左栏和侧栏品牌为默认布局。
+        参考图 2 只用于点击后出现的队列状态标记，采用图中绿色区域的原文。
+        品牌用 id=queue-brand，按钮用 id=queue-action，状态结果用 id=queue-state。
         ## 验收标准
-        - AC-1: 切换后页面变暗
+        - AC-1: 打开页面可见 Queue Monitor 标题和参考图 1 的品牌。
+        - AC-2: 点击“运行演示”后显示参考图 2 的队列状态标记。
+        - AC-3: 生产任务入队写入服务端审计记录，此项通过后端测试验收。
+        ## 非目标
+        原型无需连接生产服务。
       design_content: |
-        # DESIGN
+        # DESIGN · task eval-proto
         ## 文件归属表
-        | apps/web/src/theme.tsx | fe |
-      prototype_dir: eval-prototype-dir
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/src/audit.ts | be |
+        | apps/web/src/Queue.tsx | fe |
+        ## 实现策略
+        - 原型：生成 | G2 核对布局与按钮显示状态。
+        - 测试用按钮切换本地状态。
+      attachments: |
+        - 参考图 1：prototype-queue-reference.png（默认布局）
+        - 参考图 2：prototype-result-reference.png（点击后状态）
     assert:
-      contains: ["Prototype Agent", "Prototype directory: eval-prototype-dir", "<!DOCTYPE html>", "## 验收映射", "PROTOTYPE.md"]
+      contains: ["Prototype Agent", "index_html", "prototype_md", "<!DOCTYPE html>", "## 验收映射", "PROTOTYPE.md", "参考图 2", "Follow the written requirements"]
       max_chars: 7000
+    output_assert:
+      sections:
+        '## 原型说明':
+          regex: ['(?:参考)?图\s*1', '(?:参考)?图\s*2']
+        '## 验收映射':
+          regex: ['AC-1 → 原型演示', 'AC-2 → 原型演示', 'AC-3 → 后续验证']
+      preview:
+        visible:
+          h1: Queue Monitor
+          '#queue-brand': ORBIT-47
+        purple_sidebar: '#queue-brand'
+        actions:
+          - {click: '#queue-action', target: '#queue-state', text: SYNC-41, repeat: 2}
 
   - id: proto-en
     template: prototype-gen
     params:
       task_id: eval-proto-en
-      requirements_content: "# REQUIREMENTS\n## 需求\nCSV export button.\n"
+      requirements_content: "# REQUIREMENTS\n## 需求\nCreate a local export demo with heading Status Export.\n## 验收标准\n- AC-1: On opening the page, the heading is Status Export.\n"
       design_content: "# DESIGN\n## 文件归属表\n| apps/web/src/export.tsx | fe |\n"
-      prototype_dir: eval-prototype-en
     assert:
       contains: ["index.html", "## 原型说明", "## 局限"]
       max_chars: 7000
+    output_assert:
+      preview:
+        visible: {h1: Status Export}
 
   - id: proto-no-git
     template: prototype-gen
@@ -127,9 +401,8 @@ cases:
       task_id: eval-proto-nogit
       requirements_content: "# REQUIREMENTS\n## 需求\n列表页。\n"
       design_content: "# DESIGN\n## 文件归属表\n| apps/web/src/list.tsx | fe |\n"
-      prototype_dir: eval-prototype-nogit
     assert:
-      contains: ["do not run git", "no network assets", "Self-check"]
+      contains: ["Do not write files", "run git", "no network assets", "Self-check"]
       max_chars: 7000
 
   # ---------- implement-lane ----------
@@ -141,7 +414,7 @@ cases:
       scope: ["apps/api/src/**"]
       task_id: eval-impl-be
     assert:
-      contains: ["feat/eval-be", "apps/api/src/**", "Do not add dependencies", "out-of-scope"]
+      contains: ["feat/eval-be", "apps/api/src/**", "Do not add dependencies", "out-of-scope", "Do not weaken, skip, or delete existing tests"]
       not_contains: ["esbuild spawn EPERM"]
       max_chars: 6000
 
@@ -167,6 +440,120 @@ cases:
       contains: ["apps/api/src/**", "apps/web/src/**", "## Self-check"]
       max_chars: 6000
 
+  - id: impl-live-handoff
+    template: implement-lane
+    params:
+      branch: feat/eval-be
+      lane_instruction: 实现 G2 已批准的跨 lane 合成用例。
+      scope: [apps/api/export.py]
+    implementation:
+      files:
+        apps/api/export.py: |
+          def response(status):
+              return {"status": status}
+        apps/web/panel.py: |
+          def display(payload):
+              return payload["status"]
+        checks/test_existing.py: |
+          import unittest
+          from apps.api.export import response
+          from apps.web.panel import display
+
+          class Existing(unittest.TestCase):
+              def test_api_retains_status(self):
+                  self.assertEqual(response("ready")["status"], "ready")
+
+              def test_panel_retains_plain_status_without_token(self):
+                  self.assertEqual(display({"status": "pending"}), "pending")
+      requirements: |
+        # REQUIREMENTS
+        ## 需求
+        现有响应保留 status。只有 ready 状态增加 exportToken，前端读取可选的 exportToken 并显示在状态文案之后。
+        ## 验收标准
+        - AC-1: ready 响应等于 {"status": "ready", "exportToken": "READY-7"}，其他状态仍只有 status。
+        - AC-2: display 收到 ready 和 READY-7 时返回 "ready / READY-7"，未收到 token 时维持原显示。
+        ## 非目标
+        不增加依赖，也不修改 checks/test_existing.py 中的兼容性测试。
+      design: |
+        # DESIGN
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/export.py | be |
+        | apps/web/panel.py | fe |
+        ## 实现策略
+        - 执行顺序：be → fe
+        - be 在 response 内提供可选的 exportToken。fe 在 display 消费此前序接口，保留无 token 的分支。
+        - 验证上述四种条件，并保留既有测试。交付评测另行验证两 lane 集成结果。
+        ## 验收映射
+        - AC-1 → apps/api/export.py
+        - AC-2 → apps/web/panel.py
+      paths: [apps/api/export.py, apps/web/panel.py]
+      verify: |
+        from pathlib import Path
+        from unittest import TestLoader, TextTestRunner
+        import sys
+        sys.path.insert(0, str(Path.cwd()))
+        from apps.api.export import response
+        from apps.web.panel import display
+
+        assert response("ready") == {"status": "ready", "exportToken": "READY-7"}
+        assert response("waiting") == {"status": "waiting"}
+        assert display(response("ready")) == "ready / READY-7"
+        assert display(response("waiting")) == "waiting"
+        result = TextTestRunner().run(TestLoader().discover("checks"))
+        assert result.wasSuccessful() and result.testsRun == 2
+
+  - id: impl-live-unicode
+    template: implement-lane
+    params:
+      branch: feat/eval-be
+      lane_instruction: 仅修改 apps/api/导出.py。
+      scope: [apps/api/导出.py]
+    implementation:
+      files:
+        apps/api/导出.py: |
+          def summary(rows):
+              return "\n".join(rows)
+        checks/test_existing.py: |
+          import unittest
+          from apps.api.导出 import summary
+
+          class Existing(unittest.TestCase):
+              def test_nonempty_stays_the_same(self):
+                  self.assertEqual(summary(["甲", "乙"]), "甲\n乙")
+      requirements: |
+        # REQUIREMENTS
+        ## 需求
+        仅修改 apps/api/导出.py 的 summary，空输入返回 EMPTY-42，非空行为保持。
+        ## 验收标准
+        - AC-1: summary([]) 等于 "EMPTY-42"，非空保留换行连接。
+        ## 非目标
+        不修改既有测试。
+      design: |
+        # DESIGN
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/导出.py | be |
+        ## 实现策略
+        - 执行顺序：be
+        - 在函数中处理空输入并保持原非空逻辑。验证 AC-1 的空值和非空值。
+        ## 验收映射
+        - AC-1 → apps/api/导出.py
+      paths: [apps/api/导出.py]
+      verify: |
+        from pathlib import Path
+        from unittest import TestLoader, TextTestRunner
+        import sys
+        sys.path.insert(0, str(Path.cwd()))
+        from apps.api.导出 import summary
+
+        assert summary([]) == "EMPTY-42"
+        assert summary(["甲", "乙"]) == "甲\n乙"
+        result = TextTestRunner().run(TestLoader().discover("checks"))
+        assert result.wasSuccessful() and result.testsRun == 1
+
   # ---------- gate-fix ----------
   - id: fix-typecheck
     template: gate-fix
@@ -175,8 +562,10 @@ cases:
       gate_output_tail: "src/index.ts(12,3): error TS2304: Cannot find name 'status'"
       failed_files: ["apps/api/src/index.ts"]
       attempt: 2
+      attempt_limit: 3
+      scope: ["apps/api/src/**"]
     assert:
-      contains: ["Attempt: 2", "apps/api/src/index.ts", "TS2304", "Do not change public interfaces", "Do not add dependencies"]
+      contains: ["Attempt: 2/3", "Allowed file scope: apps/api/src/**", "apps/api/src/index.ts", "TS2304", "Do not change public interfaces", "Do not add dependencies"]
       max_chars: 6000
 
   - id: fix-unit
@@ -200,6 +589,128 @@ cases:
     assert:
       contains: ["Attempt: 3", "Files changed in this lane", "## Self-check"]
       max_chars: 6000
+
+  - id: fix-live-unit
+    template: gate-fix
+    params:
+      gate_cmd: python checks/run_unit.py
+      gate_output_tail: "AssertionError: CASE-AND-WHITESPACE"
+      failed_files: ["apps/api/labels.py"]
+      attempt: 1
+    implementation:
+      paths: ["apps/api/labels.py"]
+      repair_diagnostic: "AssertionError: 'MIXED' != 'MiXeD'"
+      unit_script: checks/run_unit.py
+      seed_patch:
+        apps/api/labels.py: |
+          def label(value):
+              return value.strip().upper()
+      files:
+        apps/api/labels.py: |
+          def label(value):
+              return value
+        checks/run_unit.py: |
+          import sys, unittest
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          from apps.api.labels import label
+
+          class Labels(unittest.TestCase):
+              def test_compatibility(self):
+                  self.assertEqual(label('MiXeD'), 'MiXeD', 'CASE-AND-WHITESPACE')
+
+              def test_normalization(self):
+                  self.assertEqual(label('  Export ready  '), 'Export ready', 'CASE-AND-WHITESPACE')
+
+          outcome = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(Labels))
+          print('runner output\n' * 220, file=sys.stderr)
+          sys.exit(not outcome.wasSuccessful())
+      requirements: |
+        # REQUIREMENTS · 显示标签
+        ## 需求
+        保留既有 label(value) 接口和大小写。只去掉输入两端的空白。
+        ## 验收标准
+        - AC-1: 输入 '  Export ready  ' 返回 'Export ready'，'MiXeD' 保持原样。
+      design: |
+        # DESIGN · 显示标签
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/api/labels.py | be |
+        ## 实现策略
+        - 执行顺序：be
+        - 保留参数与返回类型，测试文件只读。
+        ## 验收映射
+        - AC-1 → apps/api/labels.py
+      verify: |
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path.cwd()))
+        from apps.api.labels import label
+        assert label('  Export ready  ') == 'Export ready'
+        assert label('MiXeD') == 'MiXeD'
+        assert label(' A  B\t') == 'A  B'
+        print('AC-1 与两项兼容行为通过')
+
+  - id: fix-live-g2-blocked
+    template: gate-fix
+    params:
+      gate_cmd: python -m unittest discover -s checks
+      gate_output_tail: "G2-UPSTREAM-MISSING"
+      failed_files: ["apps/web/panel.py"]
+      attempt: 1
+    implementation:
+      paths: []
+      repair_diagnostic: G2-UPSTREAM-MISSING
+      repair_outcome: blocked
+      seed_patch:
+        apps/web/panel.py: |
+          def export_label(payload):
+              return payload['exportToken']
+      files:
+        apps/web/panel.py: |
+          def export_label(payload):
+              return payload['status']
+        apps/api/export.py: |
+          def response(status):
+              return {'status': status}
+        checks/test_export.py: |
+          import unittest
+          from apps.api.export import response
+          from apps.web.panel import export_label
+
+          class Export(unittest.TestCase):
+              def test_approved_upstream_contract(self):
+                  ready = response('ready')
+                  self.assertIn('exportToken', ready, 'G2-UPSTREAM-MISSING: approved token is absent in apps/api/export.py')
+                  self.assertEqual(export_label(ready), ready['exportToken'])
+      requirements: |
+        # REQUIREMENTS · 导出标签
+        ## 需求
+        显示后端响应中的原始 exportToken，前端不生成或猜测 token。
+        ## 验收标准
+        - AC-1: 就绪时显示后端 exportToken。缺少该接口时交接给前置任务。
+      design: |
+        # DESIGN · 导出标签
+        ## 文件归属表
+        | 路径 | lane |
+        | --- | --- |
+        | apps/web/panel.py | fe |
+        ## 实现策略
+        - 执行顺序：fe
+        - 依赖前置发布使 apps/api/export.py 为 ready 响应提供 exportToken。本 lane 仅改前端文件。
+        - 缺少已批准接口时报告 G2_CONFLICT 及 AC-1，由前置任务补全。前端不得伪造值或改变该验收条件。
+        ## 验收映射
+        - AC-1 → apps/web/panel.py
+      verify: |
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path.cwd()))
+        from apps.api.export import response
+        from apps.web.panel import export_label
+        assert response('ready') == {'status': 'ready'}
+        assert export_label({'status': 'pending'}) == 'pending'
+        print('受阻时提交仍保留后端与前端既有行为')
 
   # ---------- review-diff（C 层自动审查） ----------
   - id: review-basic
@@ -232,8 +743,10 @@ cases:
         +const status = req.query.status;
         diff --git a/apps/web/src/app.tsx b/apps/web/src/app.tsx
         +const saved = localStorage.getItem("filter");
+      previous_review: "Previous round: AC-2 lacked persistence evidence; typecheck passed."
+      prototype_evidence: "- AC-2 → 原型演示 | #filter | 刷新页面 | 筛选项保留"
     assert:
-      contains: ["## 结论", "## 问题", "## 建议", "PASS", "FAIL", "AC-1", "apps/web/src/app.tsx"]
+      contains: ["Pinned delivery", "PASS", "FAIL", "BLOCKED", "BASE", "AC-1", "apps/web/src/app.tsx", "AC-2 lacked persistence evidence", "G2-approved prototype acceptance evidence", "#filter", "validly DEFERRED", "must run and pass"]
       max_chars: 8000
 
   # ---------- retro-gen（C 层复盘生成） ----------
@@ -260,6 +773,37 @@ cases:
       change_summary: |
         - apps/api/src/index.ts
         - apps/web/src/app.tsx
+      evidence_bundle: '{"test.unit":["PASS","当前提交独立断言通过"]}'
     assert:
-      contains: ["## 结果", "## 偏差", "## 经验", "## 后续动作", "RETRO", "Self-check"]
+      contains: ["Retrospective Agent", "推断", "待验证", "经验", "后续动作", "Self-check", "test.unit", "human review"]
       max_chars: 8000
+
+  - id: retro-live-skipped
+    template: retro-gen
+    params:
+      task_id: eval-retro-skipped
+      requirements_content: "AC-1: 导出函数返回 current"
+      design_content: "保留既有导出调用"
+      test_report: "PASS · 当前单元测试通过"
+      deploy_report: "状态待核对"
+      change_summary: "export.py"
+      evidence_bundle: '{"staging":["SKIPPED"],"g3":["NOT_RUN"]}'
+    retrospective:
+      label: staging 跳过与历史报告
+      skipped: true
+      deploy_report: "## 结果\nPASS · 文档声称 staging 已通过，实际本次跳过。"
+
+  - id: retro-live-evidence
+    template: retro-gen
+    params:
+      task_id: eval-retro-evidence
+      requirements_content: "AC-1: 导出函数返回 current"
+      design_content: "保留既有导出调用"
+      test_report: "PASS · 当前单元测试通过"
+      deploy_report: "PASS · staging"
+      change_summary: "export.py"
+      evidence_bundle: '{"review":["PASS"],"staging":["PASS"],"g3":["APPROVED"]}'
+    retrospective:
+      label: 最终门禁与未知根因
+      skipped: false
+      deploy_report: "## 结果\nPASS · 当前 staging 已通过。旧轮次曾失败，根因尚未验证。"
