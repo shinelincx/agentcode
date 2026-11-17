@@ -802,3 +802,21 @@
 ## [2026-11-17] verify | PR #1 首轮远端验收
 
 - `f62e1aa37265f5a2ad7929d21ecccf02823a3a04` 的 `pull_request` 和 `push` 验证全部通过 `checks` 与 `gitleaks`。发布范围与运行链接见 [[wiki/项目概览#面向 main 的发布与 CI 验收（2026-11-17）]]，已同步 [[index]]。
+
+## [2026-11-17] plan | 合并 PR #1 与 River 真实项目试点
+
+- 用户授权先合并 PR #1，再用干净基线和 `d89a7cc3` 查覆盖率，通过门禁后核对原生 Worker、实际 staging、G3、复盘和交付版本。见 [[wiki/项目概览#River 真实项目试点（2026-11-17）]]。
+
+## [2026-11-17] verify | PR #1 合并与 River 试点验收
+
+- PR #1 合并到 `main` 的 `546eeaa94eb0acd76596cf845fd3acc0a3abd3ef`。合并后 `checks`、`gitleaks` 均通过。River 干净基线和历史候选覆盖率均为 95.18%，同工作树使用小写盘符精确复现 49.39% 和覆盖文件重复登记。[[wiki/项目概览#合并与覆盖率诊断]] · [main CI](https://github.com/shinelincx/agentcode/actions/runs/44018886518)
+- 实际 WSL Worker、独立测试、Docker staging、G3 和复盘追溯到 `1410d0b61d81b8b1a79c787fae6f05cd3898fd0e`，审计 12/12 通过。试点环境差异、首次审查受阻与未验证项见 [[wiki/项目概览#原生交付、Docker staging 与追溯结果]]，已同步 [[index]]。
+
+## [2026-11-17] plan | CLI 与控制台双进程恢复验收
+
+- 用户指示继续第 3 项。在隔离检出用实际 CLI、HTTP 与临时账本验证竞争、Worker 强停、旧 epoch 和录入强停。[[wiki/项目概览#CLI 与控制台双进程恢复验收（2026-11-17）]]
+
+## [2026-11-17] verify | AC-04 双进程恢复
+
+- 修复项目级互斥、租约写入竞态，补可核验的文档检查点恢复。原版 2/8，Windows 和 WSL 修复版均 8/8，Windows 全量 AC 434 通过、0 失败、2 跳过。真实 Codex 中断后 epoch 1 取消、epoch 2 完成、单条 G1 产物摘要匹配。核对录入强停残留无法启动。[[wiki/项目概览#CLI 与控制台双进程恢复验收（2026-11-17）]]
+- 更新 [[wiki/P2规划]] 的 B1 验收状态、[[wiki/平台看板]] 的跨进程执行语义及 [[index]] 导航。实现中断发现未知 Git 或部署外部状态时转人工核查。
