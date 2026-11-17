@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import ledger
 import intake
 import task_approval
+import task_execution
 
 PLATFORM = Path(__file__).resolve().parent
 CONSOLE_DIR = PLATFORM / "console"
@@ -489,6 +490,8 @@ class ControlRunner:
             raise ControlError(f"任务状态为 {row['status']}，当前没有待审批闸门", 409)
         if action == "decide" and not revision:
             revision = task_approval.pending_revision(self.db_path, task_id)
+            if not revision:
+                raise ControlError("无待审版本，请刷新后提交审批版本")
         if action == "rerun" and not entry:
             raise ControlError("缺少重跑起始节点 from", 400)
         with self._lock:
@@ -549,11 +552,14 @@ class ControlRunner:
                 revision: str = "") -> str:
         """同步执行一次动作并返回摘要（测试可直接调用）。"""
         import graph as g
-        with _GRAPH_LOCK:
-            g.bind_workspace(self.ws)
-            g.refresh_runtime_config()
-            return self._execute(task_id, action, decision=decision, by=by, entry=entry,
-                                 reason=reason, revision=revision)
+        try:
+            with _GRAPH_LOCK, task_execution.exclusive(self.ws):
+                g.bind_workspace(self.ws)
+                g.refresh_runtime_config()
+                return self._execute(task_id, action, decision=decision, by=by, entry=entry,
+                                     reason=reason, revision=revision)
+        except task_execution.ExecutionError as exc:
+            raise ControlError(str(exc)) from exc
 
     def _execute(self, task_id: str, action: str, *, decision: str, by: str,
                  entry: str, reason: str, revision: str) -> str:
@@ -585,10 +591,9 @@ class ControlRunner:
         elif action == "rerun":
             if not snap.values:
                 raise ControlError("任务尚无图状态，无法重跑（先 start）", 409)
-            if snap.next:
-                raise ControlError(f"任务挂起于 {snap.next[0]}，请先审批而非重跑", 409)
-            g.reset_task_for_rerun(task_id, entry)
-            app.invoke(g.rerun_payload(task_id, entry), cfg)
+            if not task_execution.resume_interrupted(self.db_path, task_id, app, cfg, snap, entry):
+                g.reset_task_for_rerun(task_id, entry)
+                app.invoke(g.rerun_payload(task_id, entry), cfg)
         else:
             raise ControlError(f"未知动作：{action}", 400)
 

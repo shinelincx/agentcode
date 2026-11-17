@@ -472,14 +472,16 @@ def record_operation(db: sqlite3.Connection, task_id: str, operation_key: str,
 
     B1 栅栏：传 lease_epoch 时先校验租约，旧 epoch 直接 StaleLeaseError 且不落库。
     """
-    if lease_epoch is not None:
-        _assert_lease(db, node_run_id, lease_epoch, worker_id)
-    cur = db.execute(
-        "INSERT OR IGNORE INTO operations (task_id, node_run_id, operation_key, op_type, payload_hash, status, result_ref) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (task_id, node_run_id, operation_key, op_type, payload_hash, status, result_ref),
-    )
-    db.commit()
+    with db:
+        if lease_epoch is not None:
+            # Serialize the check and insert against acquire_lease in other processes.
+            db.execute("BEGIN IMMEDIATE")
+            _assert_lease(db, node_run_id, lease_epoch, worker_id)
+        cur = db.execute(
+            "INSERT OR IGNORE INTO operations (task_id, node_run_id, operation_key, op_type, payload_hash, status, result_ref) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (task_id, node_run_id, operation_key, op_type, payload_hash, status, result_ref),
+        )
     return cur.rowcount > 0
 
 
