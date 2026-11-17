@@ -109,6 +109,7 @@ def recover_implementation(db_path, task, app, cfg, snap):
 
 
 def recover_deployment(db_path, task, app, cfg, snap):
+    import contract_delivery
     import graph as graph
     import worker
     from project_runs import staging_proof
@@ -128,6 +129,10 @@ def recover_deployment(db_path, task, app, cfg, snap):
         tested, _ = read_report(db, task, docs, snap.values, "test", "TEST_REPORT.md", head)
         if not tested:
             raise manual("缺少绑定到当前 HEAD 的独立测试")
+        try:
+            contract_delivery.validate(db, task, docs, snap.values, current, repo)
+        except (ValueError, OSError) as exc:
+            raise manual(str(exc)) from exc
         probe = f"{{project-run}} check-staging {project} {head}"
         passed, out = worker.run_gate(probe, repo, timeout=90)
         if not passed:

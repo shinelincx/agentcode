@@ -1968,7 +1968,7 @@ def test_node(state: DeliveryState) -> dict:
         if _close(db, run, "failed", worker_id, epoch):
             ledger.set_task_status(db, task_id, "gate_failed", node="test")
         return {"test_report": "", "test_receipt": {}}
-    if not gates:
+    if not gates and "contracts" not in config:
         ledger.record_gate_result(db, task_id, "test_config", False,
                                   "未配置可用测试门禁（test.gates / tech_stack.gate_commands）",
                                   node_run_id=run)
@@ -2003,18 +2003,33 @@ def test_node(state: DeliveryState) -> dict:
         if not stable:
             break
 
+    contract = {}
+    if "contracts" in config and all(ok for _, _, ok, _ in results):
+        import contract_delivery
+        import subprocess
+        import tarfile
+
+        try:
+            contract, checks = contract_delivery.verify(config, repo, retro_evidence.delivery_head(state))
+        except (ValueError, OSError, subprocess.SubprocessError, tarfile.TarError) as exc:
+            checks = [("contract_config", "", False, str(exc))]
+        for name, command, passed, out in checks:
+            ledger.record_gate_result(db, task_id, f"test_{name}", passed, out, node_run_id=run)
+            results.append((name, command, passed, out))
+
     commits = [part["commit"] for part in delivery.get("commits", [])] or [r["operation_key"] for r in db.execute(
         "SELECT operation_key FROM operations WHERE task_id=? AND op_type='git_commit' "
         "ORDER BY id", (task_id,))]
     report_path.write_text(_render_test_report(task_id, results, commits), encoding="utf-8")
 
-    all_ok = bool(gates) and all(ok for _, _, ok, _ in results)
+    all_ok = bool(gates or contract) and all(ok for _, _, ok, _ in results)
     if all_ok:
         if not _close(db, run, "done", worker_id, epoch):
             return {"test_report": ""}
         ledger.set_task_status(db, task_id, "running", node="test")
+        extra = {"contract": contract} if contract else {}
         return {"test_report": str(report_path),
-                "test_receipt": retro_evidence.receipt(report_path, retro_evidence.delivery_head(state), run)}
+                "test_receipt": retro_evidence.receipt(report_path, retro_evidence.delivery_head(state), run, **extra)}
     if _close(db, run, "failed", worker_id, epoch):
         ledger.set_task_status(db, task_id, "gate_failed", node="test")
     return {"test_report": "", "test_receipt": {}}
@@ -2091,6 +2106,16 @@ def deploy_node(state: DeliveryState) -> dict:
     docs_dir = RIVER_WS / task_id / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     report_path = docs_dir / "DEPLOY_REPORT.md"
+    import contract_delivery
+
+    try:
+        if "contracts" in config or (state.get("test_receipt") or {}).get("contract"):
+            contract_delivery.validate(db, task_id, docs_dir, state, config, _repo_path())
+    except (ValueError, OSError) as exc:
+        ledger.record_gate_result(db, task_id, "deploy_contract", False, str(exc))
+        report_path.write_text(_render_deploy_report(task_id, f"BLOCKED · {exc}", []), encoding="utf-8")
+        ledger.set_task_status(db, task_id, "gate_failed", node="deploy")
+        return {"deploy_report": "", "deploy_skipped": False, "deploy_receipt": {}, "g3_receipt": {}}
     if deferred_tests := state.get("review_deferred_tests"):
         tested, _ = retro_evidence.read_report(db, task_id, docs_dir, state, "test", "TEST_REPORT.md",
                                                retro_evidence.delivery_head(state))
